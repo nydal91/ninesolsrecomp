@@ -2046,14 +2046,18 @@ static VkRect2D scissor_rect(void) {
                 }
             }
         }
-        double gw = w / pass_sx;  // (the target's own width)
+        // (the width of the level drawn into: a mip chain's smaller levels - MvDK's background blur, 480x270 and
+        // 240x135 of a 960x540 target - span their own level with a scissor of its size, which against level 0's
+        // width looked like a menu's clip and was squeezed into the middle: the levels' sides kept the last frame's
+        // objects, black shapes beside the real ones on a wide screen)
+        double gw = (pass_w ? pass_w : w) / pass_sx;
         if (x > 0 || x + sw < gw - 0.5) {
             double c = gw / 2, x0 = c + (x - c) / shape, x1 = c + (x + sw - c) / shape;
             x = (int)floor(x0); sw = (int)ceil(x1) - x;
         }
     }
     if (shape < 1 && pass_out && pass_sy > 0 && sh < 16384) {  // (a taller window: the same, vertically)
-        double gh = h / pass_sy;
+        double gh = (pass_h ? pass_h : h) / pass_sy;  // (the level's: as gw above)
         if (y > 0 || y + sh < gh - 0.5) {
             double c = gh / 2, y0 = c + (y - c) * shape, y1 = c + (y + sh - c) * shape;
             y = (int)floor(y0); sh = (int)ceil(y1) - y;
@@ -4280,6 +4284,12 @@ static bool up_patch_frag(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *
         if (!m->found) memcpy(buf, g, nw * 4);
         m->found = true;
         buf[i] = 1.0f / (float)up_fix.aw, buf[i + 1] = 1.0f / (float)up_fix.ah;
+        // A vec4 (1/w, 1/h, w, h): the size too, or the two disagree. MvDK's background blur (fs 23ace68c9c0b4e28)
+        // snaps its sample to a texel centre, floor(uv x w - 0.5) + 0.5, then scales back by 1/w: with only 1/w
+        // made the allocated size's, every sample landed at game size / allocated size of its place (x 1/1.29 on a
+        // 2480-wide phone screen), and the blurred copy's cut-outs of the foreground showed as black shapes beside it.
+        if (!(i & 3) && i + 3 < nw && g[i + 2] == (float)up_fix.tw && g[i + 3] == (float)up_fix.th)
+            buf[i + 2] = (float)up_fix.aw, buf[i + 3] = (float)up_fix.ah;
         if (nlog < 4) {
             nlog++;
             LOG("[upsample] %ux%u texture at %ux%u: fragment texel size %g %g -> %g %g (constant buffer %llx word %llu)\n",

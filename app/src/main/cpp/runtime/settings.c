@@ -40,7 +40,7 @@ Settings g_settings = {
     .fps_limit = FPS_DEFAULT,
     .precompile_shaders = true,
     .vsync = VSYNC_DEFAULT,
-    .wide_view = false,  // (MvDK: its levels are framed for 16:9 - a wider view shows the void past a level's edge and the enemies the game parks off-screen, drawn as black shapes)
+    .wide_view = true,  // (MvDK: wide and ultrawide screens see more of each level; the HUD stays 16:9 in the middle)
     .fov = 100,
     .color_lut_strength = 100,
 };
