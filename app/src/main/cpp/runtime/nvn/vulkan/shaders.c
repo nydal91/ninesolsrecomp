@@ -508,6 +508,7 @@ ShaderInfo *vk_translate_cached(const uint8_t *code, size_t max_size, int stage,
 
 // (testing) SAVAGEWIND_VK_SPIRV_SALT=<n>: every module's SPIR-V generator word made n: the same shaders, binaries the
 // driver has never seen - its own shader cache misses them all, as on a first start or in a place never visited.
+void vk_module_note(VkShaderModule m, const uint32_t *spv, size_t n);
 VkShaderModule vk_module(const uint32_t *spv, size_t nwords) {
     static long salt = -1;
     if (salt < 0) salt = getenv("SAVAGEWIND_VK_SPIRV_SALT") ? atol(getenv("SAVAGEWIND_VK_SPIRV_SALT")) : 0;
@@ -520,8 +521,32 @@ VkShaderModule vk_module(const uint32_t *spv, size_t nwords) {
     VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nwords * 4, .pCode = spv};
     VkShaderModule m;
     bool ok = vkCreateShaderModule(g_vk.dev, &ci, NULL, &m) == VK_SUCCESS;
+    if (ok) vk_module_note(m, spv, nwords);
     free(copy);
     return ok ? m : VK_NULL_HANDLE;
+}
+
+// (MvDK bring-up) each module's SPIR-V, so a pipeline the driver refuses can write its shaders (vk_module_dump)
+static struct { VkShaderModule m; uint32_t *spv; size_t n; } mod_spv[8192];
+static int mod_nspv;
+static pthread_mutex_t mod_lock = PTHREAD_MUTEX_INITIALIZER;
+void vk_module_note(VkShaderModule m, const uint32_t *spv, size_t n) {
+    pthread_mutex_lock(&mod_lock);
+    if (mod_nspv < 8192) {
+        uint32_t *c = malloc(n * 4);
+        if (c) { memcpy(c, spv, n * 4); mod_spv[mod_nspv].m = m; mod_spv[mod_nspv].spv = c; mod_spv[mod_nspv++].n = n; }
+    }
+    pthread_mutex_unlock(&mod_lock);
+}
+void vk_module_dump(VkShaderModule m, const char *path) {
+    pthread_mutex_lock(&mod_lock);
+    for (int i = 0; i < mod_nspv; i++)
+        if (mod_spv[i].m == m) {
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite(mod_spv[i].spv, 4, mod_spv[i].n, f); fclose(f); }
+            break;
+        }
+    pthread_mutex_unlock(&mod_lock);
 }
 
 VkShaderModule vk_compile_glsl(const char *src, int stage, const char *name) {
@@ -592,9 +617,9 @@ int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *out, int max) {
 }
 
 VkDescriptorSetLayout vk_set_layout(const VkBindingInfo *b, int n, uint32_t set, VkShaderStageFlags stages) {
-    VkDescriptorSetLayoutBinding lb[96];
+    VkDescriptorSetLayoutBinding lb[160];
     uint32_t k = 0;
-    for (int i = 0; i < n && k < 96; i++)
+    for (int i = 0; i < n && k < 160; i++)
         if (b[i].set == set) lb[k++] = (VkDescriptorSetLayoutBinding){b[i].binding, b[i].type, 1, stages, NULL};
     VkDescriptorSetLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = k, .pBindings = lb};
     VkDescriptorSetLayout l;

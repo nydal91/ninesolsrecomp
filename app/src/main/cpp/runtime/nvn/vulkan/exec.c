@@ -518,6 +518,14 @@ void vk_translator_setup(void) {
     maxwell_gmem_split = false;  // (Android: the heap through the pieces' addresses, binding 17)
 #endif
     maxwell_gmem_snap = gsnap_mode() != 0;
+#ifdef GMEM_BDA
+    {   // (MvDK) Qualcomm's own driver refuses every pipeline whose shader reads through a buffer_reference (-13: the
+        // text's vertex shader): read-only shaders take their global memory from the copies only. SAVAGEWIND_VK_NO_BDA=0/1
+        const char *e = getenv("SAVAGEWIND_VK_NO_BDA");
+        maxwell_gmem_no_bda = e ? atoi(e) != 0 : drv.driverID == VK_DRIVER_ID_QUALCOMM_PROPRIETARY;
+        if (maxwell_gmem_no_bda) LOG("[vk] global memory reads through copies only (no buffer device addresses in shaders)\n");
+    }
+#endif
     LOG("[vk] shader global memory: %s (storage buffer limit %u MB), the HUD's reads %s\n",
         maxwell_gmem_split ? "two bindings" : "one binding", g_vk.props.limits.maxStorageBufferRange >> 20,
         maxwell_gmem_snap ? "through copies" : "in place");
@@ -604,7 +612,7 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
     for (;;) {
         if (s->cur_pool == s->npools) {
             if (s->npools == 64) FATAL("descriptor pools exhausted\n");
-            VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16384},
+            VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 65536},
                                             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768},
                                             {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096}, {VK_DESCRIPTOR_TYPE_SAMPLER, 4096},
                                             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 32768},
@@ -2254,7 +2262,7 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
 }
 
 // ================================================================== programs
-#define MAX_BIND 96
+#define MAX_BIND 160
 typedef struct {
     ShaderInfo *vi, *fi;
     uint64_t code[2], cmax[2];  // translation inputs (copied: translated on the translator thread)
@@ -3088,7 +3096,22 @@ static VkResult create_pipeline_flags(const PipeState *k, VkShaderModule vsm, Vk
         *out = VK_NULL_HANDLE;  // (lookup only: not in that cache)
     } else if (r != VK_SUCCESS) {
         static int n;
-        if (n++ < 10) LOG("[vk] pipeline creation failed: %d\n", r);
+        if (n++ < 10) {
+            LOG("[vk] pipeline creation failed: %d (topo %u, %u colour [%d %d], depth %d stencil %d, samples %u, a2c %u, "
+                "clamp %u, fill %u, blend %#x, %u bindings %u attribs %u divisors, feedback %u, flags %#x)\n", r,
+                k->topo_class, k->ncolor, k->ncolor > 0 ? (int)k->color[0] : -1, k->ncolor > 1 ? (int)k->color[1] : -1,
+                (int)k->depth, (int)k->stencil, (unsigned)k->samples, (unsigned)k->a2c, (unsigned)k->depth_clamp,
+                (unsigned)k->poly_fill, (unsigned)k->blend_on, nb, na, nd, (unsigned)k->feedback, (unsigned)pi.flags);
+            {
+                extern void vk_module_dump(VkShaderModule m, const char *path);
+                char path[96];
+                mkdir("build", 0755);
+                snprintf(path, sizeof path, "build/fail_%d_vs.spv", n); vk_module_dump(vsm, path);
+                snprintf(path, sizeof path, "build/fail_%d_fs.spv", n); vk_module_dump(fsm, path);
+            }
+            for (uint32_t i = 0; i < na; i++) LOG("[vk]   attrib loc %u binding %u format %d offset %u\n", va[i].location,
+                                                 va[i].binding, (int)va[i].format, va[i].offset);
+        }
     } else if (cache == g_vk.pcache) {
         cache_feedback(&fb);
     }
@@ -4909,6 +4932,22 @@ void backend_heap_set(uint64_t size) {
 void backend_heap_set(uint64_t size) { (void)size; }
 #endif
 
+#ifdef __ANDROID__
+// (MvDK, maxwell_gmem_no_bda) half h of the heap's pieces (128 MB each: maxStorageBufferRange) as a storage buffer, or a
+// small zeroed one where that piece isn't in GPU memory
+static VkDescriptorBufferInfo gmem_half_info(uint32_t h) {
+    uint32_t pc = h >> 1;
+    uint64_t off = (uint64_t)(h & 1) << (GMEM_PIECE_SHIFT - 1), half = 1ull << (GMEM_PIECE_SHIFT - 1);
+    if (pc < GMEM_PIECES && hp_buf[pc] && hp_len[pc] > off) {
+        uint64_t n = hp_len[pc] - off < half ? hp_len[pc] - off : half;
+        return (VkDescriptorBufferInfo){hp_buf[pc], off, n};
+    }
+    static uint32_t zero[64];
+    VkSpan z = vk_transient_copy(zero, sizeof zero, 256);
+    return (VkDescriptorBufferInfo){z.buf, z.off, sizeof zero};
+}
+#endif
+
 static VkDescriptorBufferInfo gmem_info(void) {
 #ifdef __ANDROID__
     if (hp_tab) return (VkDescriptorBufferInfo){hp_tab, 0, GMEM_TABLE_SIZE};
@@ -6049,6 +6088,9 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             w[n].pBufferInfo = &bi[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
             bi[n] = b->binding == MVEC_HISTORY_BINDING ? mvec_history_info()
+#ifdef __ANDROID__
+                  : b->binding >= GMEMP_BINDING && b->binding < GMEMP_BINDING + GMEM_HALVES ? gmem_half_info(b->binding - GMEMP_BINDING)
+#endif
                   : b->binding == GSNAP_BUFFER_INDEX   ? gsnap_info(stage)
                   : b->binding == GMEM2_BUFFER_INDEX   ? gmem_info_hi()
                                                        : gmem_info();
@@ -6906,6 +6948,16 @@ static void draw_(CmdRec *r, bool indexed) {
         }
         extern volatile int g_skip_fs_off;
         if (last_skip && !g_skip_fs_off) { stat_skipped++; return; }
+        {   // (debugging) SAVAGEWIND_SKIP_VSHASH=<hash>[,<hash>]: draws of those vertex shaders skipped (save_glsl's names)
+            static const char *vsl = (const char *)1;
+            if (vsl == (const char *)1) vsl = getenv("SAVAGEWIND_SKIP_VSHASH");
+            uint64_t vs = st.program->stages[0].code_addr;
+            if (vsl && vs) {
+                char hx_[20];
+                snprintf(hx_, sizeof hx_, "%016llx", (unsigned long long)hmix(1469598103934665603ull, (const void *)(uintptr_t)(vs + 0x30), 0x200));
+                if (strstr(vsl, hx_)) { stat_skipped++; return; }
+            }
+        }
         if (g_debug_frame && getenv("SAVAGEWIND_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;
     }

@@ -1770,7 +1770,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                        "%s }\n", size < 2 ? "3ul" : "2ul", size < 2 ? 0xFFu : 0xFFFFu, R(d),
                        size < 2 ? 0xFFu : 0xFFFFu,
 #ifdef GMEM_BDA
-                       "atomicAnd(GW_(wi), gm); atomicOr(GW_(wi), gv);");
+                       "GSTB_(wi, gm, gv);");
 #else
                        maxwell_gmem_split ? "if (wi < GSPLIT) { atomicAnd(gmem_.w[wi], gm); atomicOr(gmem_.w[wi], gv); } "
                                             "else { atomicAnd(gmem2_.w[wi - GSPLIT], gm); atomicOr(gmem2_.w[wi - GSPLIT], gv); }"
@@ -2253,14 +2253,40 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
 #ifdef GMEM_BDA
         // Android (Adreno): the heap in 256 MB pieces (hardware buffers under 512 MB, 128 MB storage buffer ranges), each
         // read through its buffer device address: binding 17 holds the pieces' addresses and the words mapped (exec.c)
+        if (maxwell_gmem_no_bda) {
+            // (MvDK) Qualcomm's own driver refuses every pipeline with a buffer_reference access (-13): the heap pieces as
+            // storage buffers instead, each in two 128 MB halves (maxStorageBufferRange), GMEMP_BINDING + half (exec.c)
+            sp(&s, "layout(std430, set = %d, binding = %d) readonly buffer GMem { uint64_t ch[%d]; uint lim; } gmt_;\n", set,
+               GMEM_BUFFER_INDEX, GMEM_PIECES);
+            for (int k = 0; k < GMEM_HALVES; k++)
+                sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GP%d { uint w[]; } gp%d_;\n", set, GMEMP_BINDING + k,
+                   c->uses_gmem_store ? "" : "readonly ", k, k);
+            sp(&s, "uint GW_f(uint i) {\n  uint o_ = i & 0x1FFFFFFu;\n  switch (i >> 25u) {\n");
+            for (int k = 0; k < GMEM_HALVES; k++) sp(&s, "  case %du: return gp%d_.w[o_];\n", k, k);
+            sp(&s, "  }\n  return 0u;\n}\n#define GLD0(i) GW_f(i)\n");
+            if (c->uses_gmem_store) {
+                sp(&s, "void GST_f(uint i, uint v) {\n  uint o_ = i & 0x1FFFFFFu;\n  switch (i >> 25u) {\n");
+                for (int k = 0; k < GMEM_HALVES; k++) sp(&s, "  case %du: gp%d_.w[o_] = v; break;\n", k, k);
+                sp(&s, "  }\n}\n");
+                sp(&s, "void GSTB_f(uint i, uint m, uint v) {\n  uint o_ = i & 0x1FFFFFFu;\n  switch (i >> 25u) {\n");
+                for (int k = 0; k < GMEM_HALVES; k++) sp(&s, "  case %du: atomicAnd(gp%d_.w[o_], m); atomicOr(gp%d_.w[o_], v); break;\n", k, k, k);
+                sp(&s, "  }\n}\n#define GSTB_(i, m, v) GSTB_f((i), (m), (v))\n");
+            }
+            if (c->uses_gmem_store || !maxwell_gmem_snap)
+                sp(&s, "#define GLD(i) GLD0(i)\n#define GST(i, v) { GST_f((i), (v)); }\n");
+            else
+                goto gsnap_glsl;
+        } else {
         sp(&s, "layout(buffer_reference, std430, buffer_reference_align = 4) buffer GWords { uint w[]; };\n"
                "layout(std430, set = %d, binding = %d) readonly buffer GMem { uint64_t ch[%d]; uint lim; } gmt_;\n"
                "#define GW_(i) GWords(gmt_.ch[(i) >> %du]).w[(i) & 0x%Xu]\n", set, GMEM_BUFFER_INDEX, GMEM_PIECES,
            GMEM_PIECE_SHIFT - 2, (1u << (GMEM_PIECE_SHIFT - 2)) - 1);
-        sp(&s, "#define GLD0(i) GW_(i)\n");
+        sp(&s, "#define GLD0(i) GW_(i)\n#define GSTB_(i, m, v) { atomicAnd(GW_(i), (m)); atomicOr(GW_(i), (v)); }\n");
         if (c->uses_gmem_store || !maxwell_gmem_snap) {
             sp(&s, "#define GLD(i) GLD0(i)\n#define GST(i, v) { GW_(i) = (v); }\n");
-        } else
+        } else goto gsnap_glsl;
+        }
+        if (0)
 #else
         bool split = maxwell_gmem_split;
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,
@@ -2277,6 +2303,9 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             else
                 sp(&s, "#define GST(i, v) { gmem_.w[(i)] = (v); }\n");
         } else
+#endif
+#ifdef GMEM_BDA
+        gsnap_glsl:
 #endif
         {
             // Read-only, maxwell_gmem_snap: up to 4 ranges of the heap copied at translation (exec.c gsnap: what the HUD's
@@ -2461,11 +2490,11 @@ size_t maxwell_binary_size(const uint8_t *blob, size_t max_size, int stage) {
 #ifndef TRANSLATOR_ID
 #define TRANSLATOR_ID __DATE__ " " __TIME__
 #endif
-bool maxwell_gmem_split, maxwell_gmem_snap;
+bool maxwell_gmem_split, maxwell_gmem_snap, maxwell_gmem_no_bda;
 // (the two switches above change translations: they name caches of their own)
 const char *maxwell_translator_id(void) {
     static __thread char id[64];  // (per thread: the precompile's workers ask for it at once)
-    snprintf(id, sizeof id, "%s%s%s", TRANSLATOR_ID, maxwell_gmem_split ? "-gs" : "", maxwell_gmem_snap ? "-gn" : "");
+    snprintf(id, sizeof id, "%s%s%s%s", TRANSLATOR_ID, maxwell_gmem_split ? "-gs" : "", maxwell_gmem_snap ? "-gn" : "", maxwell_gmem_no_bda ? "-sb" : "");
     return id;
 }
 
@@ -3010,7 +3039,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     const uint8_t *sph = blob + 0x30;
     const uint8_t *code = blob + 0x80;
     // compute programs have neither the 0x30-byte NVN header nor an SPH: code starts at the blob
-    if (stage == STAGE_COMPUTE) code = blob;
+    // (older NVN, MvDK: a 0x100-byte compute header with magic 0x12345679 before the code)
+    if (stage == STAGE_COMPUTE) code = *(const uint32_t *)blob == 0x12345679u && max_size > 0x100 ? blob + 0x100 : blob;
     c->code = code;
     if (stage == STAGE_FRAGMENT) {
         c->omap_target = *(const uint32_t *)(sph + 0x48);
@@ -3026,7 +3056,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     // collect branch targets (labels)
     uint8_t *label = calloc(end + 4, 1);
     label[1] = 1;
-    bool any_branch = false;
+    bool any_branch = false, has_brx = false;
     for (size_t i = 0; i < end; i++) {
         if (i % 4 == 0) continue;
         uint64_t w = ((const uint64_t *)code)[i];
@@ -3040,14 +3070,33 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
             if (t >= 0 && (size_t)(t / 8) < end) label[t / 8] = 1;
             any_branch = true;
         }
-        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: any instruction may be a target
+        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: computed target (a jump table in a cbuf)
             any_branch = true;
-            memset(label, 1, end);
+            has_brx = true;
         }
         if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || (w & 0xfff0000000000000ull) == 0xe340000000000000ull ||
             (w & 0xfff0000000000000ull) == 0xe350000000000000ull)
             any_branch = true;
         (void)is_branch_target_op;
+    }
+    if (has_brx) {
+        // (MvDK) every instruction a case of the state machine made Turnip's compiled code ~100x slower (MvDK's file
+        // select: 2.5 s a frame). A jump table's targets begin basic blocks: label what follows each block end (BRA,
+        // BRX, EXIT, BRK, CONT, SYNC), skipping scheduling words. SAVAGEWIND_BRX_ALL=1: every instruction, as before.
+        static int all = -1;
+        if (all < 0) all = getenv("SAVAGEWIND_BRX_ALL") != NULL;
+        if (all) memset(label, 1, end);
+        else
+            for (size_t i = 0; i < end; i++) {
+                if (i % 4 == 0) continue;
+                uint64_t w = ((const uint64_t *)code)[i], o = w & 0xfff0000000000000ull;
+                bool ends = o == 0xe240000000000000ull || o == 0xe250000000000000ull || o == 0xe300000000000000ull ||
+                            o == 0xe340000000000000ull || o == 0xe350000000000000ull || (w & 0xfff8000000000000ull) == 0xf0f8000000000000ull;
+                if (!ends) continue;
+                size_t j = i + 1;
+                if (j % 4 == 0) j++;
+                if (j < end) label[j] = 1;
+            }
     }
     if (c->glsl && any_branch) structure_flow(c, (const uint64_t *)code, end);
     c->writes = calloc(end + 1, sizeof *c->writes);
