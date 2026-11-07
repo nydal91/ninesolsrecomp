@@ -1046,7 +1046,7 @@ SERVICE("audren:u", audren_u) {
         ipc_return_object(resp, service_new("IAudioRenderer", audio_renderer, r));
         break;
     }
-    case 1: OUT(uint64_t, 0) = 0x1000000; resp_size(resp, 8); break;  // GetWorkBufferSize: 16 MB
+    case 1: OUT(uint64_t, 0) = 0x200000; resp_size(resp, 8); break;  // GetWorkBufferSize: 2 MB (MvDK sizes its Sound heap for hardware's; our mixer keeps its own state)
     case 2: case 4: ipc_return_object(resp, service_new("IAudioDevice", audio_device, NULL)); break;
     default: LOG("[audren] cmd %u (ok)\n", req->cmd);
     }
@@ -1092,6 +1092,8 @@ static void SDLCALL sdk_stream_get(void *u, SDL_AudioStream *st, int additional,
 
 static bool sdk_renderer_on(void) {
     const char *e = ENV("SAVAGEWIND_AUDIO_DFC");
+    // (MvDK: an older sdk without AudioRenderSystem::ExecuteAudioRendererRendering keeps the audren service path)
+    if (!loader_find_symbol("_ZN2nn5audio6server17AudioRenderSystem29ExecuteAudioRendererRenderingEv")) return false;
     return !e || strcmp(e, "0");
 }
 
@@ -1561,4 +1563,13 @@ SERVICE("audout:u", audout_u) {
     }
     default: LOG("[audout] cmd %u (ok)\n", req->cmd);
     }
+}
+
+// MvDK bring-up: AcquireMemoryPool(config, pool, address, size) -> bool, logged
+HLE_FUNC("_ZN2nn5audio17AcquireMemoryPoolEPNS0_19AudioRendererConfigEPNS0_14MemoryPoolTypeEPvm", hle_acquire_pool_trace) {
+    uint64_t cfg = c->x[0], pool = c->x[1], addr = c->x[2], size = c->x[3];
+    SDK_AUDIO_CALL("_ZN2nn5audio17AcquireMemoryPoolEPNS0_19AudioRendererConfigEPNS0_14MemoryPoolTypeEPvm");
+    LOG("[audren-sdk] AcquireMemoryPool cfg %#llx pool %#llx addr %#llx size %#llx -> %llu (pool info %#llx)\n",
+        (unsigned long long)cfg, (unsigned long long)pool, (unsigned long long)addr, (unsigned long long)size,
+        (unsigned long long)(c->x[0] & 0xff), (unsigned long long)*(uint64_t *)(uintptr_t)pool);
 }

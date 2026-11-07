@@ -605,8 +605,10 @@ def discover(m, starts):
 
 def main_sites(nso, base, opts):
     """(version, sites) of a main module (tools/game_sites.py); none with --no-sites"""
-    if opts.no_sites:
-        return '', {}
+    if not opts.no_sites and nso.build_id[:16] not in {v.build_id for v in game_sites.VERSIONS}:
+        opts.no_sites = True  # (MvDK: not a BotW build: none of its sites, none of its patches)
+    if opts.no_sites:  # (MvDK: still the two sites without a pattern, where main's .data starts and its image ends)
+        return '', {'main_data': base + nso.data[0], 'main_end': base + nso.size}
     return game_sites.for_module(nso, base, opts.any_version, lambda s: print(s, file=sys.stderr))
 
 
@@ -615,7 +617,7 @@ def generate(name, nso, base, outdir, opts, sites=None):
     m = Module(name, nso, base, opts.simd)
     if name == 'main':
         m.sites = sites if sites is not None else main_sites(m.nso, base, opts)[1]
-        m.patches = patches.table(m.sites) if m.sites else {}
+        m.patches = patches.table(m.sites) if m.sites and not opts.no_sites else {}
     starts = m.boundaries()
     hle = {}
     if opts.hle and os.path.exists(opts.hle):

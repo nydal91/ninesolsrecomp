@@ -88,11 +88,12 @@ static bool take_sites(const GameLibTables *t) {
     for (size_t i = 0; i < sizeof want / sizeof want[0]; i++) {
         uint32_t k = 0;
         while (k < *t->nsites && strcmp(t->sites[k].name, want[i].name)) k++;
-        if (k == *t->nsites) {
-            snprintf(g_error, sizeof g_error, "the game code has no address for %s", want[i].name);
-            return false;
-        }
-        *(uint64_t *)((char *)&g_site + want[i].off) = t->sites[k].addr;
+        // MvDK: the BotW sites don't exist in other games; a missing one is 0 (the features using it stay off)
+        // (a zeroed block: what the runtime reads there is a null pointer, a zero count, no match)
+        // (one per site: the runtime writes some of them, as the controller step's 1.0f)
+        static _Alignas(16) uint8_t s_absent_site[sizeof want / sizeof want[0]][0x20000];
+        *(uint64_t *)((char *)&g_site + want[i].off) =
+            k == *t->nsites ? (uint64_t)(uintptr_t)s_absent_site[i] : t->sites[k].addr;
     }
     g_game_version = t->version;
     return true;

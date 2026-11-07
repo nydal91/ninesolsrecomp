@@ -10,5 +10,4 @@
 #pragma once
 
 #define GAME_VERSIONS(X)                     \
-    X("1.8.2", "de0b6ac4efc1dda7", 1, 41056) \
-    X("1.9.0", "cd57b23fa4bbad65", 1, 41062)
+    X("MvDK", "43ae51ee9766867d", 1, 3162)  /* Mario vs. Donkey Kong (2024): no System/Version.txt in its RomFS */
