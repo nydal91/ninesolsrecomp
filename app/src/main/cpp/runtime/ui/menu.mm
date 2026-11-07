@@ -6,6 +6,7 @@
 #import <Metal/Metal.h>
 #endif
 #include <SDL3/SDL.h>
+#include <float.h>
 #include <math.h>
 #include <pthread.h>
 #include <atomic>
@@ -62,7 +63,7 @@ extern "C" void menu_request_window_size_apply(void) { g_size_apply_at.store(SDL
 extern "C" bool game_options_input_hold(void);  // game_options.mm: a binding capture from the game's Options screen
 
 struct QEvent {
-    enum { KEY, ANALOG, MOUSE_POS, MOUSE_BUTTON, WHEEL, TEXT, FOCUS } kind;
+    enum { KEY, ANALOG, MOUSE_POS, MOUSE_BUTTON, WHEEL, TEXT, FOCUS, FRAME_BREAK } kind;  // (FRAME_BREAK: the rest next frame)
     ImGuiKey key;
     bool down;
     float value, x, y;
@@ -226,6 +227,20 @@ bool menu_handle_event(const SDL_Event *e) {
         push(q);
         return false;  // the input runtime also releases its cached controls
     }
+    // a double tap on free screen opens the settings (runtime/touch.c touch_double_tap; with the menu open the taps are
+    // ImGui's, and the menu closes from its own controls)
+    static uint64_t dtap_quiet_until;  // (the opening tap's own mouse events, which SDL makes from the touch: not a
+                                       // click in the menu - it landed on a text field and brought up the keyboard)
+    if (touch_double_tap(e) && !g_open.load() && g_kbd.load() != 1 && !console_is_open()) {
+        set_open(true);
+        dtap_quiet_until = SDL_GetTicks() + 400;
+        return true;
+    }
+    if (SDL_GetTicks() < dtap_quiet_until &&
+        (((e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_MOUSE_BUTTON_UP) && e->button.which == SDL_TOUCH_MOUSEID) ||
+         (e->type == SDL_EVENT_MOUSE_MOTION && e->motion.which == SDL_TOUCH_MOUSEID) || e->type == SDL_EVENT_FINGER_UP ||
+         e->type == SDL_EVENT_FINGER_MOTION))
+        return true;
     // a binding capture (Controls tab, or the game's Options screen) takes the press
     if (bind_capture_event(e)) return true;
     if (e->type == SDL_EVENT_KEY_DOWN) g_last_pad = false;
@@ -358,11 +373,63 @@ bool menu_handle_event(const SDL_Event *e) {
         }
         return true;
     }
+    case SDL_EVENT_FINGER_DOWN: case SDL_EVENT_FINGER_UP: case SDL_EVENT_FINGER_MOTION: case SDL_EVENT_FINGER_CANCELED: {
+        // (a phone: the menu's taps as the mouse - SDL made no mouse events from them here, so a tap in the menu did
+        // nothing - and a drag up or down as the wheel, which scrolls the list under the finger; a drag lets go of the
+        // press first, away from what it started on, so it clicks nothing). One finger: the first down until it lifts.
+        if (!capturing() || e->tfinger.touchID == SDL_MOUSE_TOUCHID) return false;
+        static SDL_FingerID held;
+        static bool holding, dragging;
+        static float y0, ylast;
+        SDL_Window *w = SDL_GetWindowFromID(e->tfinger.windowID);
+        int pw = 0, ph = 0;
+        if (!w || !SDL_GetWindowSizeInPixels(w, &pw, &ph) || ph <= 0) return true;
+        float x = e->tfinger.x * pw, y = e->tfinger.y * ph;
+        auto pos = [](float px, float py) { QEvent q = {}; q.kind = QEvent::MOUSE_POS; q.x = px; q.y = py; push(q); };
+        auto button = [](bool down) {
+            // (a frame between the move and the press, and after the press: ImGui's tabs take a press only on what the
+            // pointer was over the frame before - in one frame with the move, a tap on a tab did nothing)
+            QEvent br = {}; br.kind = QEvent::FRAME_BREAK; push(br);
+            QEvent q = {}; q.kind = QEvent::MOUSE_BUTTON; q.button = 0; q.down = down; push(q);
+            push(br);
+        };
+        if (e->type == SDL_EVENT_FINGER_DOWN) {
+            if (holding) return true;
+            holding = true, dragging = false, held = e->tfinger.fingerID, y0 = ylast = y;
+            pos(x, y);
+            button(true);
+            return true;
+        }
+        if (!holding || e->tfinger.fingerID != held) return true;
+        if (e->type == SDL_EVENT_FINGER_MOTION) {
+            if (!dragging && fabsf(y - y0) > ph * 0.03f) {
+                dragging = true;
+                pos(-FLT_MAX, -FLT_MAX);  // (let go away from the item: no click)
+                button(false);
+            }
+            pos(x, y);
+            if (dragging) {
+                QEvent q = {}; q.kind = QEvent::WHEEL; q.x = 0; q.y = (y - ylast) / (ph * 0.06f); push(q);
+            }
+            ylast = y;
+            return true;
+        }
+        holding = false;
+        if (!dragging) {
+            if (e->type == SDL_EVENT_FINGER_UP) pos(x, y);
+            else pos(-FLT_MAX, -FLT_MAX);  // (cancelled: let go without a click)
+            button(false);
+        }
+        pos(-FLT_MAX, -FLT_MAX);  // (no hover left behind)
+        return true;
+    }
     case SDL_EVENT_MOUSE_MOTION:
+        if (e->motion.which == SDL_TOUCH_MOUSEID && capturing()) return true;  // (the fingers above are the touch)
         if (!capturing() && !pc_gyro_scene_active()) return false;
         { QEvent q = {}; q.kind = QEvent::MOUSE_POS; q.x = e->motion.x * g_pixel_density; q.y = e->motion.y * g_pixel_density; push(q); }
         return true;
     case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:
+        if (e->button.which == SDL_TOUCH_MOUSEID && capturing()) return true;  // (as above)
         if (!capturing() && !pc_gyro_scene_active()) return false;
         {
             QEvent q = {};
@@ -385,7 +452,13 @@ void menu_apply_window_requests(void *win) {
     SDL_Window *w = (SDL_Window *)win;
     g_pixel_density = SDL_GetWindowPixelDensity(w);
     static bool text_input;
+#ifdef __ANDROID__
+    // (a phone: text input is the on-screen keyboard, which covered half the screen whenever the menu opened - only
+    // while something is being typed into: a text field, the name entry, the console)
+    bool want_text = g_kbd.load() == 1 || console_is_open() || (g_open.load() && g_text_busy.load());
+#else
     bool want_text = capturing();
+#endif
     if (want_text != text_input) {
         if (want_text) SDL_StartTextInput(w);
         else SDL_StopTextInput(w);
@@ -537,7 +610,14 @@ static void drain_events(ImGuiIO &io) {
     std::vector<QEvent> ev;
     ev.swap(q_events);
     pthread_mutex_unlock(&q_lock);
-    for (const QEvent &q : ev) {
+    for (size_t i = 0; i < ev.size(); i++) {
+        const QEvent &q = ev[i];
+        if (q.kind == QEvent::FRAME_BREAK) {  // (the events after it: next frame, ahead of any newer ones)
+            pthread_mutex_lock(&q_lock);
+            q_events.insert(q_events.begin(), ev.begin() + i + 1, ev.end());
+            pthread_mutex_unlock(&q_lock);
+            break;
+        }
         switch (q.kind) {
         case QEvent::KEY: io.AddKeyEvent(q.key, q.down); break;
         case QEvent::ANALOG: io.AddKeyAnalogEvent(q.key, q.value > 0.1f, q.value); break;
@@ -546,6 +626,7 @@ static void drain_events(ImGuiIO &io) {
         case QEvent::WHEEL: io.AddMouseWheelEvent(q.x, q.y); break;
         case QEvent::TEXT: io.AddInputCharactersUTF8(q.text); break;
         case QEvent::FOCUS: io.AddFocusEvent(q.down); break;
+        case QEvent::FRAME_BREAK: break;
         }
     }
 }

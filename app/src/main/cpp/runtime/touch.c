@@ -204,6 +204,60 @@ bool touch_event(const SDL_Event *e) {
     return true;
 }
 
+// Double tap: a tap is a finger down and up within TAP_MS, moved less than TAP_MOVE (screen heights); the second
+// must start within DTAP_MS of the first's lift and land within DTAP_DIST of it. One finger at a time (a second
+// finger down meanwhile is no tap). With the touch controls on, a tap that starts on a button or in the stick's part
+// is the controls' (double-tapping A to jump twice opens nothing).
+#define TAP_MS 250
+#define TAP_MOVE 0.04f
+#define DTAP_MS 350
+#define DTAP_DIST 0.12f
+bool touch_double_tap(const SDL_Event *e) {
+    static SDL_FingerID id;
+    static bool down, eligible;
+    static float x0, y0, last_x, last_y;
+    static uint64_t t0, last_up;
+    static int fingers;
+    if (e->type != SDL_EVENT_FINGER_DOWN && e->type != SDL_EVENT_FINGER_MOTION && e->type != SDL_EVENT_FINGER_UP &&
+        e->type != SDL_EVENT_FINGER_CANCELED)
+        return false;
+    if (e->tfinger.touchID == SDL_MOUSE_TOUCHID) return false;
+    SDL_Window *w = SDL_GetWindowFromID(e->tfinger.windowID);
+    int ww = 0, wh = 0;
+    float a = w && SDL_GetWindowSize(w, &ww, &wh) && ww > 0 && wh > 0 ? (float)ww / wh : aspect;
+    float x = e->tfinger.x * a, y = e->tfinger.y;
+    uint64_t now = SDL_GetTicks();
+    if (e->type == SDL_EVENT_FINGER_DOWN) {
+        fingers++;
+        if (fingers > 1) { down = false, last_up = 0; return false; }
+        int role = ROLE_LOOK;
+        if (enabled()) {
+            float sa = aspect;
+            aspect = a;
+            role = hit(x, y);
+            aspect = sa;
+        }
+        id = e->tfinger.fingerID, down = true, eligible = role == ROLE_LOOK, x0 = x, y0 = y, t0 = now;
+        return false;
+    }
+    if (e->type == SDL_EVENT_FINGER_MOTION) {
+        if (down && e->tfinger.fingerID == id && hypotf(x - x0, y - y0) > TAP_MOVE) eligible = false;
+        return false;
+    }
+    if (fingers > 0) fingers--;
+    if (!down || e->tfinger.fingerID != id) return false;
+    down = false;
+    bool tap = e->type == SDL_EVENT_FINGER_UP && eligible && now - t0 <= TAP_MS && hypotf(x - x0, y - y0) <= TAP_MOVE;
+    if (!tap) { last_up = 0; return false; }
+    if (last_up && t0 - last_up <= DTAP_MS && hypotf(x0 - last_x, y0 - last_y) <= DTAP_DIST) {
+        last_up = 0;
+        LOG("[touch] double tap at %.3f,%.3f: settings\n", x, y);
+        return true;
+    }
+    last_up = now, last_x = x, last_y = y;
+    return false;
+}
+
 uint64_t touch_buttons(void) {
     if (!touch_active()) return 0;
     return buttons | (SDL_GetTicks() < short_until ? short_bits : 0);
