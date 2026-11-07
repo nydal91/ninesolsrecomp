@@ -2016,6 +2016,14 @@ static void present_locked(NvnTexture *t) {
     }
 presented:
     g_fg_want = fg_wanted();  // (for the next frame's draws)
+    {   // (Android) the frame's work time to the performance hint session (perfhint.c): all but the pacing sleeps
+        extern uint64_t g_pace_sleep_ns;
+        extern void perfhint_frame(uint64_t idle_ns);
+        static uint64_t last_pace;
+        uint64_t pace = g_pace_sleep_ns;
+        perfhint_frame(pace >= last_pace ? pace - last_pace : pace);
+        last_pace = pace;
+    }
     extern void vk_prof_frame(uint64_t frame, uint64_t present_ns);
     vk_prof_frame(total_frames, SDL_GetTicksNS() - t0);
     extern void vk_list_stats_frame(void);

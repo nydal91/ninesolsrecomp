@@ -396,9 +396,12 @@ static void *thread_main(void *arg) {
     t_cur = t;
     crash_handler_install();
     rt_set_fpcr(0);
+    extern void perfhint_thread(void), perfhint_thread_end(void);
+    perfhint_thread();  // (Android: in the hint session, on the fast cores - perfhint.c)
     core_acquire(t);
     if (!setjmp(t->unwind)) guest_call(&t->cpu, t->entry);
     core_release(t);
+    perfhint_thread_end();
     klock();
     t->finished = true;
     kernel_signal(&t->obj);

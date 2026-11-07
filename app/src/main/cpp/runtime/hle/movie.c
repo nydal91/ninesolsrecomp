@@ -614,7 +614,7 @@ static void dec_acquire_input(Cpu *c) {
     pthread_mutex_lock(&d->lock);
     int out_free = 0;
     for (int i = 0; i < NOUT; i++) if (!d->out_busy[i]) out_free++;
-    if (out_free < 2 || d->npending) { pthread_mutex_unlock(&d->lock); c->x[0] = 1; return; }  // backpressure
+    if (out_free < 2 || d->npending || d->stopped) { pthread_mutex_unlock(&d->lock); c->x[0] = 1; return; }  // backpressure
     int idx = -1, free_n = 0;
     for (int i = 0; i < NIN; i++)
         if (!d->in_busy[i]) { if (idx < 0) idx = i; else free_n++; }
@@ -740,7 +740,9 @@ static void dec_acquire_output(Cpu *c) {
     Decoder *d = self_state(c);
     n_acq_out++;
     pthread_mutex_lock(&d->lock);
-    if (!d->nready) { pthread_mutex_unlock(&d->lock); c->x[0] = 1; return; }
+    // (stopped: none, as a stopped decoder - MvDK's player thread pushes what it gets into its renderer's queue,
+    // which Stop's caller has already torn down: signal 11 at the end of the intro movie)
+    if (!d->nready || d->stopped) { pthread_mutex_unlock(&d->lock); c->x[0] = 1; return; }
     OutReady r = d->ready[0];
     if (d->video && !(r.flags & MOVIE_EOS) && movie_paced()) {
         // A picture is handed out once its time has come on a clock started at the first one: the game's player
@@ -758,7 +760,7 @@ static void dec_acquire_output(Cpu *c) {
             av_usleep((unsigned)(wait / 1000));
             kernel_host_work_end();
             pthread_mutex_lock(&d->lock);
-            if (!d->nready) { pthread_mutex_unlock(&d->lock); c->x[0] = 1; return; }  // (stopped meanwhile)
+            if (!d->nready || d->stopped) { pthread_mutex_unlock(&d->lock); c->x[0] = 1; return; }  // (stopped meanwhile)
             r = d->ready[0];
         } else if (now - due > 100000000) d->clock_ns = now, d->clock_us = r.time;
     }
