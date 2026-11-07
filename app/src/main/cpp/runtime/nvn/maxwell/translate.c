@@ -147,7 +147,9 @@ static const char *cbuf_ref(Ctx *c, int idx, int64_t off, const char *dyn, char 
         if (dyn || off < 0 || (off >> 4) >= 256) c->info->cbuf_rows_all |= 1u << idx;
         else c->info->cbuf_rows[idx][off >> 10] |= 1ull << ((off >> 4) & 63);
     }
-    if (dyn) sprintf(buf, "cbr(cb%d, (%s) + %lldu)", idx, dyn, (long long)off);
+    // (register + imm: the address wraps in the 64 KB buffer, as on the GPU - MvDK's skinning reads its bone matrices
+    // at c[7][Rn + 0xFFE0], Rn - 32; unwrapped, past the end: clamped, Mario's vertices smeared across the screen)
+    if (dyn) sprintf(buf, "cbr(cb%d, ((%s) + %lldu) & 0xFFFFu)", idx, dyn, (long long)off);
     else sprintf(buf, "cb%d[%lld][%lld]", idx, (long long)(off >> 4), (long long)((off >> 2) & 3));
     return buf;
 }
@@ -1218,6 +1220,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int n = sz == 5 ? 2 : 1;
         char rb[16];
         const char *dyn = a == RZ ? NULL : reg(c, a, rb);
+        // LDC.64 into the pair holding its own address (LDC.64 R34, c[7][R34 - 8]: MvDK's 4-bone skinning): both words
+        // from the address before the load - the second read must not see the first's result (the cap's depth missed
+        // its pre-pass: a black cap)
+        bool latch = dyn && n == 2 && (a == d || a == d + 1);
+        if (latch) { sp(&c->body, "    { uint lda_ = %s;\n", dyn); dyn = "lda_"; }
         for (int i = 0; i < n; i++) {
             char cb[256];
             cbuf_ref(c, idx, off + 4 * i, dyn, cb);
@@ -1225,6 +1232,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             if (dyn) c->info->cbuf_size[idx] = 0x10000;
             set_reg(c, d + i, cb);
         }
+        if (latch) sp(&c->body, "    }\n");
     } else if (OPM(0xd000000000000000ull, 0xf600000000000000ull)) {  // TEXS
         emit_texs(c, w, false);
     } else if (OPM(0xd200000000000000ull, 0xf600000000000000ull)) {  // TLDS
@@ -2965,12 +2973,13 @@ static bool walk_path(Ctx *c, WalkSet *ws, Walk *s, const uint64_t *code, size_t
             int words = bits(w, 48, 3) == 5 ? 2 : 1;
             for (int k = 0; k < words; k++) {
                 if (a != RZ && idx < 18) {
-                    uint32_t vec = (wv(s, a) + off + 4u * (uint32_t)k) >> 4;
-                    if (!wk(s, a) || vec >= 4096) *whole |= 1u << idx;  // (past 64 KB: the clamp reads the last vec4)
+                    uint32_t vec = ((wv(s, a) + off + 4u * (uint32_t)k) & 0xFFFFu) >> 4;  // (wraps in 64 KB, as emitted)
+                    if (!wk(s, a)) *whole |= 1u << idx;
                     else if (vec + 1 > reach[idx]) reach[idx] = vec + 1;
                 }
-                if (d + k < RZ) wset(s, d + k, false, 0);  // (before the next word's address: as emitted)
             }
+            for (int k = 0; k < words; k++)
+                if (d + k < RZ) wset(s, d + k, false, 0);  // (after both words: the address is latched)
         }
         int d = (int)bits(w, 0, 8);
         uint32_t v = 0;
