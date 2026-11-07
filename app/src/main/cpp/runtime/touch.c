@@ -40,10 +40,11 @@ static int layout(float a, Btn *b) {
     b[n++] = (Btn){BIND_B, "B", fx, fy + fo, fr};
     b[n++] = (Btn){BIND_X, "X", fx, fy - fo, fr};
     b[n++] = (Btn){BIND_Y, "Y", fx - fo, fy, fr};
-    b[n++] = (Btn){BIND_ZL, "ZL", 0.12f, 0.09f, 0.065f};
-    b[n++] = (Btn){BIND_L, "L", 0.29f, 0.09f, 0.065f};
-    b[n++] = (Btn){BIND_ZR, "ZR", a - 0.12f, 0.09f, 0.065f};
-    b[n++] = (Btn){BIND_R, "R", a - 0.29f, 0.09f, 0.065f};
+    // (MvDK: L and R - the camera's look around in a level, the world in the menus - at the screen's sides, clear of
+    // the lives counter and the item box at the top left and the timer at the top right; no ZL / ZR or stick clicks,
+    // which the game doesn't use)
+    b[n++] = (Btn){BIND_L, "L", 0.10f, 0.42f, 0.065f};
+    b[n++] = (Btn){BIND_R, "R", a - 0.10f, 0.36f, 0.065f};
     b[n++] = (Btn){BIND_MINUS, "-", a * 0.5f - 0.10f, 0.07f, 0.045f};
     b[n++] = (Btn){BIND_PLUS, "+", a * 0.5f + 0.10f, 0.07f, 0.045f};
     const float dx = 0.60f, dy = 0.80f, d = 0.085f, dr = 0.05f;  // d-pad
@@ -51,8 +52,6 @@ static int layout(float a, Btn *b) {
     b[n++] = (Btn){BIND_UP, "^", dx, dy - d, dr};
     b[n++] = (Btn){BIND_RIGHT, ">", dx + d, dy, dr};
     b[n++] = (Btn){BIND_DOWN, "v", dx, dy + d, dr};
-    b[n++] = (Btn){BIND_LSTICK, "L3", 0.10f, 0.38f, 0.05f};
-    b[n++] = (Btn){BIND_RSTICK, "R3", a - 0.50f, 0.88f, 0.05f};
     return n;
 }
 

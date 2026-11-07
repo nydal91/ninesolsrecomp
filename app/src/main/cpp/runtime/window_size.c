@@ -331,7 +331,11 @@ void winsize_apply(void *win) {
     bool keep_size = first && getenv("SAVAGEWIND_WINDOW");
     first = false;
     read_displays();
+#ifdef __ANDROID__
+    bool fs = !test;  // (a phone: always fullscreen - SDL hides the status and navigation bars only then; they covered the HUD)
+#else
     bool fs = g_settings.fullscreen && !test;
+#endif
     // Video > Monitor: to that display first (out of fullscreen for the move: a fullscreen window keeps its display)
     SDL_DisplayID to = test ? 0 : target_display(), d = SDL_GetDisplayForWindow(w);
     if (to && to != d) {
