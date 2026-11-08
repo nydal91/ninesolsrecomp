@@ -154,6 +154,14 @@ int framepace_target(void) {
     if (event == -2) event = env_int("SAVAGEWIND_EVENT_FPS", 0);
     int fps = forced >= 0 ? forced : g_settings.fps_limit;
     if (fps < 0) fps = FPS_DEFAULT;
+    // MvDK runs a step of its game per frame (no frame time in its logic): it plays at its speed only at 60 - at 120
+    // it ran twice as fast, at 30 half. Its own slowdown (present interval 2 when a frame is late) it paces itself.
+    // So it draws 60 at every setting; a rate over that only while Frame generation is making the pictures between
+    // (g_fg_active: framepace_period_ns then halves the drawing rate). It doesn't for MvDK yet (vulkan/framegen.cpp
+    // finds no scene image in its frames): with it switched on the game drew 120 and ran twice as fast.
+    // SAVAGEWIND_FPS still forces one (tests).
+    extern volatile int g_fg_active;
+    if (forced < 0) fps = fps > 60 && g_fg_active ? fps : 60;
     if (movie != 0 && __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) > 0) {
         int cap = movie > 0 ? movie : g_movie_fps;
         if (fps == 0 || fps > cap) fps = cap;

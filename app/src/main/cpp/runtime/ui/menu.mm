@@ -873,10 +873,9 @@ static void tab_display(void) {
             if (fps[i] == g_settings.fps_limit) cur = i;
             if (fps[i] == FPS_DEFAULT) def = i;
         }
-        std::string desc = tr("How many pictures a second the game draws. The game itself runs at the same speed at "
-                              "every rate (the console runs it at 30). Higher rates need a faster computer. Menus, "
-                              "cutscenes and conversations use it too, and videos play at their own speed. Off: as "
-                              "many as the computer can draw.");
+        std::string desc = tr("Mario vs. Donkey Kong runs at 60 pictures a second, as on the console: its game moves "
+                              "a step per picture, so it draws 60 at every setting here (more made it run faster, "
+                              "fewer slower).");
         int hz = (int)lroundf(winsize_refresh_rate());
         if (hz > 0) {
             char line[200];
