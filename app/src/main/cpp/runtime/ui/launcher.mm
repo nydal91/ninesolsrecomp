@@ -1074,7 +1074,7 @@ extern "C" void launcher_run(const char *root, int mode) {
     ui_window_init();
     SDL_Window *win = ui_window();
     g_launcher_win = win;
-    SDL_SetWindowTitle(win, g_setup_only ? "Savage Wind" : "Savage Wind Configuration");
+    SDL_SetWindowTitle(win, g_setup_only ? "MvDK Recomp" : "MvDK Recomp Configuration");
 #ifdef __APPLE__
     CAMetalLayer *layer = (__bridge CAMetalLayer *)ui_metal_layer();
     id<MTLDevice> dev = (__bridge id<MTLDevice>)ui_metal_device();
@@ -1258,7 +1258,7 @@ extern "C" void launcher_run(const char *root, int mode) {
             ImGui::SetCursorPos(ImVec2(x0, 120 * s));
             ImGui::PushFont(g_font_title);
             if (page == MAIN) {  // gold to orange, shadowed (not behind the Settings / Game Files windows)
-                const char *t = "Savage Wind";
+                const char *t = "MvDK Recomp";
                 ImVec2 p = ImGui::GetCursorScreenPos();
                 text_fx(ImGui::GetWindowDrawList(), ImGui::GetFont(), ImGui::GetFontSize(), p, IM_COL32(255, 232, 120, 255),
                         IM_COL32(255, 138, 48, 255), t, 3 * s);

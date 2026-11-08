@@ -1,6 +1,6 @@
 // The start screen's background (splash.h). The player's own picture when there is one (rt_user_splash: splash.jpg /
-// splash.png in the data folder, decoded with stb_image), shown filling the window; else Savage Wind's own art, drawn
-// here: an old forest at a sunlit clearing, the icon's plain sword (docs/icon/icon.svg) in a mossy stone, the grass
+// splash.png in the data folder, decoded with stb_image), shown filling the window; else MvDK Recomp's own art
+// (girder_art: a building site at sunset). Savage Wind's forest art is kept below (forest_art): an old forest at a sunlit clearing, the icon's plain sword (docs/icon/icon.svg) in a mossy stone, the grass
 // swaying, petals and fireflies. The menu sits on the left, so the clearing is on the right. The start screen lays its
 // dark banners over either, which keep its text readable.
 #ifdef __APPLE__
@@ -386,8 +386,196 @@ static void forest_art(ImDrawList *dl, ImVec2 sz, float t) {
     dl->AddRectFilledMultiColor(ImVec2(0, H * 0.82f), sz, z, z, v, v);
 }
 
+
+// ------------------------------------------------------------------ MvDK Recomp's own art
+// A toy-works building site at sunset: a far city, a lattice tower, red steel girders with rivets climbing to the
+// right joined by yellow ladders, a crane with its hook swinging, a wind-up key turning in a toy box on the top beam,
+// sparks drifting. Original art; the menu sits on the left, so the girders are on the right.
+
+// A steel girder from a to b, `th` thick: flanges, a truss web between them and rivets along both flanges
+static void girder(ImDrawList *dl, ImVec2 a, ImVec2 b, float th, float s) {
+    ImVec2 d(b.x - a.x, b.y - a.y);
+    float len = sqrtf(d.x * d.x + d.y * d.y);
+    ImVec2 u(d.x / len, d.y / len), n(-u.y, u.x);  // (n points down for a left-to-right beam)
+    auto at = [&](float along, float across) { return ImVec2(a.x + u.x * along + n.x * across, a.y + u.y * along + n.y * across); };
+    // shadow under it
+    quad_grad(dl, at(0, th * 0.5f), at(len, th * 0.5f), at(len, th * 0.95f), at(0, th * 0.95f), rgba(0x1a0610, 0.45f),
+              rgba(0x1a0610, 0.45f), rgba(0x1a0610, 0), rgba(0x1a0610, 0));
+    // the web's dark back
+    quad_grad(dl, at(0, -th * 0.5f), at(len, -th * 0.5f), at(len, th * 0.5f), at(0, th * 0.5f), rgba(0x5a0e14),
+              rgba(0x5a0e14), rgba(0x2c050a), rgba(0x2c050a));
+    // the truss: zigzag bars
+    float f = th * 0.2f, cell = th * 1.1f;
+    int nc = (int)(len / cell);
+    if (nc < 1) nc = 1;
+    cell = len / nc;
+    for (int i = 0; i < nc; i++) {
+        ImVec2 p0 = at(i * cell, (i & 1 ? 1 : -1) * (th * 0.5f - f)), p1 = at((i + 1) * cell, (i & 1 ? -1 : 1) * (th * 0.5f - f));
+        dl->AddLine(p0, p1, rgba(0xc8282c), th * 0.16f);
+        dl->AddLine(at(i * cell, -th * 0.5f + f), at(i * cell, th * 0.5f - f), rgba(0x9a1a20), th * 0.10f);
+    }
+    // flanges: lit on top
+    quad_grad(dl, at(0, -th * 0.5f), at(len, -th * 0.5f), at(len, -th * 0.5f + f), at(0, -th * 0.5f + f), rgba(0xff8a6a),
+              rgba(0xff8a6a), rgba(0xe0383a), rgba(0xe0383a));
+    quad_grad(dl, at(0, th * 0.5f - f), at(len, th * 0.5f - f), at(len, th * 0.5f), at(0, th * 0.5f), rgba(0xd2302f),
+              rgba(0xd2302f), rgba(0x8a141a), rgba(0x8a141a));
+    // rivets
+    int nr = (int)(len / (th * 0.55f));
+    for (int i = 1; i < nr; i++) {
+        float x = len * i / nr;
+        for (int side = -1; side <= 1; side += 2) {
+            ImVec2 c = at(x, side * (th * 0.5f - f * 0.5f));
+            dl->AddCircleFilled(c, f * 0.32f, rgba(0x6a0c12), 8);
+            dl->AddCircleFilled(ImVec2(c.x - f * 0.08f, c.y - f * 0.08f), f * 0.2f, rgba(0xffc0a8), 8);
+        }
+    }
+    (void)s;
+}
+
+// A ladder from top (x, y0) down to y1, `w` wide
+static void ladder(ImDrawList *dl, float x, float y0, float y1, float w, float s) {
+    float r = w * 0.14f;
+    dl->AddRectFilled(ImVec2(x - w * 0.5f + r * 0.6f, y0 + r), ImVec2(x + w * 0.5f + r * 0.6f, y1 + r), rgba(0x1a0610, 0.35f));
+    for (float y = y0 + w * 0.35f; y < y1 - w * 0.1f; y += w * 0.45f)
+        dl->AddRectFilledMultiColor(ImVec2(x - w * 0.5f, y), ImVec2(x + w * 0.5f, y + r * 0.9f), rgba(0xffe27a),
+                                    rgba(0xffe27a), rgba(0xc08a1c), rgba(0xc08a1c));
+    for (int side = -1; side <= 1; side += 2) {
+        float cx = x + side * w * 0.5f;
+        dl->AddRectFilledMultiColor(ImVec2(cx - r * 0.5f, y0), ImVec2(cx + r * 0.5f, y1), rgba(0xfff0a0), rgba(0xd89a24),
+                                    rgba(0xd89a24), rgba(0xfff0a0));
+    }
+    (void)s;
+}
+
+// A lattice column (the tower's legs and braces), dark against the sky
+static void lattice(ImDrawList *dl, float x, float w, float top, float bottom, ImU32 c, float lw) {
+    dl->AddLine(ImVec2(x, top), ImVec2(x, bottom), c, lw * 1.6f);
+    dl->AddLine(ImVec2(x + w, top), ImVec2(x + w, bottom), c, lw * 1.6f);
+    for (float y = top; y < bottom; y += w) {
+        dl->AddLine(ImVec2(x, y), ImVec2(x + w, y + w), c, lw);
+        dl->AddLine(ImVec2(x + w, y), ImVec2(x, y + w), c, lw);
+        dl->AddLine(ImVec2(x, y), ImVec2(x + w, y), c, lw);
+    }
+}
+
+static void girder_art(ImDrawList *dl, ImVec2 sz, float t) {
+    float W = sz.x, H = sz.y, s = H / 720.0f;
+    // sunset sky: deep blue above, rose and orange at the horizon
+    float hz = H * 0.66f;
+    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(W, H * 0.35f), rgba(0x0c1036), rgba(0x1a1a52), rgba(0x5a2a78), rgba(0x3a2268));
+    dl->AddRectFilledMultiColor(ImVec2(0, H * 0.35f), ImVec2(W, hz), rgba(0x3a2268), rgba(0x5a2a78), rgba(0xff8a4c), rgba(0xd8586a));
+    // stars, twinkling in the dark part
+    for (uint32_t i = 0; i < 70; i++) {
+        float k = 0.5f + 0.5f * sinf(t * (0.8f + hash01(i * 3 + 7)) + i);
+        ImVec2 p(hash01(i * 3 + 5) * W, hash01(i * 3 + 6) * H * 0.38f);
+        dl->AddCircleFilled(p, (0.8f + 1.2f * hash01(i * 3 + 8)) * s, rgba(0xfff6e0, 0.25f + 0.6f * k * (1 - p.y / (H * 0.38f))), 6);
+    }
+    // the low sun behind the site
+    glow(dl, ImVec2(W * 0.74f, hz), H * 0.75f, rgba(0xffe0a0, 0.65f), rgba(0xff9a5a, 0.22f), 0.3f);
+    dl->AddCircleFilled(ImVec2(W * 0.74f, hz - H * 0.02f), H * 0.10f, rgba(0xffe8b0, 0.9f), 48);
+    // the far city: blocks with lit windows
+    for (uint32_t i = 0; i < 34; i++) {
+        float x = (i + hash01(i * 5 + 300) * 0.4f) / 34 * W * 1.05f - W * 0.02f, w = W * (0.022f + 0.02f * hash01(i * 5 + 301));
+        float h = H * (0.06f + 0.16f * hash01(i * 5 + 302));
+        dl->AddRectFilled(ImVec2(x, hz - h), ImVec2(x + w, hz + 2), rgba(0x2a1640, 0.92f));
+        for (float wy = hz - h + 6 * s; wy < hz - 6 * s; wy += 9 * s)
+            for (float wx = x + 4 * s; wx < x + w - 5 * s; wx += 8 * s) {
+                uint32_t q = (uint32_t)(wx * 13 + wy * 7);
+                if (hash01(q) < 0.62f) continue;
+                float on = sinf(t * 0.3f + hash01(q + 1) * 40) > -0.6f ? 1 : 0;
+                dl->AddRectFilled(ImVec2(wx, wy), ImVec2(wx + 3 * s, wy + 4 * s), rgba(0xffd27a, 0.75f * on));
+            }
+    }
+    // haze over the city
+    dl->AddRectFilledMultiColor(ImVec2(0, hz - H * 0.12f), ImVec2(W, hz), rgba(0xff9a6a, 0), rgba(0xff9a6a, 0),
+                                rgba(0xff9a6a, 0.28f), rgba(0xff9a6a, 0.28f));
+    // the ground: the site's dark yard, a hazard-striped kerb at its edge
+    dl->AddRectFilledMultiColor(ImVec2(0, hz), sz, rgba(0x2a1a2e), rgba(0x3a2230), rgba(0x0e0a14), rgba(0x0e0a14));
+    {
+        float y0 = H * 0.86f, y1 = y0 + H * 0.035f, st = H * 0.06f;
+        dl->AddRectFilled(ImVec2(0, y0), ImVec2(W, y1), rgba(0x15101a));
+        for (float x = -st; x < W + st; x += st * 2) {
+            ImVec2 q[4] = {ImVec2(x, y1), ImVec2(x + st, y1), ImVec2(x + st * 1.6f, y0), ImVec2(x + st * 0.6f, y0)};
+            fill(dl, q, 4, rgba(0xf2b632, 0.9f));
+        }
+        dl->AddRectFilledMultiColor(ImVec2(0, y1), ImVec2(W, y1 + H * 0.02f), rgba(0, 0.5f), rgba(0, 0.5f), rgba(0, 0), rgba(0, 0));
+    }
+    // the tower behind the girders, and the crane on it
+    ImU32 dark = rgba(0x1a0c22, 0.95f);
+    float tx = W * 0.90f, tw = H * 0.07f;
+    lattice(dl, tx, tw, H * 0.10f, H * 0.87f, dark, 3 * s);
+    lattice(dl, W * 0.50f, H * 0.05f, H * 0.36f, H * 0.87f, rgba(0x1a0c22, 0.8f), 2.5f * s);
+    {   // the crane's arm, out over the site to the left, and its hook swinging
+        float ay = H * 0.10f;
+        dl->AddLine(ImVec2(tx + tw * 0.5f, ay - H * 0.06f), ImVec2(W * 0.56f, ay), dark, 3 * s);
+        dl->AddLine(ImVec2(tx + tw * 0.5f, ay - H * 0.06f), ImVec2(W * 1.02f, ay), dark, 3 * s);
+        for (int side = 0; side < 2; side++) dl->AddLine(ImVec2(W * 0.56f, ay + side * H * 0.025f), ImVec2(W * 1.02f, ay + side * H * 0.025f), dark, 3 * s);
+        for (float x = W * 0.56f; x < W * 1.0f; x += H * 0.025f)
+            dl->AddLine(ImVec2(x, ay), ImVec2(x + H * 0.025f, ay + H * 0.025f), dark, 2 * s);
+        float sw = 0.08f * sinf(t * 0.7f), len = H * 0.22f, hx = W * 0.66f;
+        ImVec2 top(hx, ay + H * 0.025f), hook(hx + sinf(sw) * len, top.y + cosf(sw) * len);
+        dl->AddLine(top, hook, rgba(0x2a1a30), 2 * s);
+        dl->AddCircle(ImVec2(hook.x, hook.y + 9 * s), 8 * s, rgba(0x3a2a40), 12, 4 * s);
+        dl->AddRectFilled(ImVec2(hook.x - 7 * s, hook.y - 6 * s), ImVec2(hook.x + 7 * s, hook.y + 2 * s), rgba(0xf2b632));
+        // the warning light on top, blinking
+        if (fmodf(t, 1.6f) < 0.8f) glow(dl, ImVec2(tx + tw * 0.5f, ay - H * 0.07f), 14 * s, rgba(0xff4040, 0.95f), rgba(0xff2020, 0.3f), 0.3f);
+    }
+    // the girders climbing to the right, each sloping the other way, joined by ladders
+    float th = H * 0.05f;
+    struct Beam { float x0, y0, x1, y1; };
+    static const Beam beams[] = {{0.40f, 0.835f, 1.02f, 0.80f}, {0.46f, 0.62f, 1.02f, 0.655f},
+                                 {0.42f, 0.47f, 0.98f, 0.435f}, {0.54f, 0.28f, 0.96f, 0.30f}};
+    static const float ladders[][3] = {{0.92f, 0, 1}, {0.55f, 1, 2}, {0.86f, 2, 3}};  // (x, from beam, to beam)
+    auto beam_y = [&](int b, float x) {
+        const Beam &B = beams[b];
+        return H * (B.y0 + (B.y1 - B.y0) * (x - B.x0) / (B.x1 - B.x0));
+    };
+    for (auto &l : ladders) {
+        float x = l[0];
+        ladder(dl, W * x, beam_y((int)l[2], x) + th * 0.4f, beam_y((int)l[1], x) - th * 0.5f, H * 0.045f, s);
+    }
+    for (auto &B : beams) girder(dl, ImVec2(W * B.x0, H * B.y0), ImVec2(W * B.x1, H * B.y1), th, s);
+    {   // a toy box on the top beam with its wind-up key turning
+        float bx = W * 0.70f, by = beam_y(3, 0.70f) - th * 0.5f, bw = H * 0.09f;
+        dl->AddRectFilledMultiColor(ImVec2(bx - bw * 0.5f, by - bw * 0.8f), ImVec2(bx + bw * 0.5f, by), rgba(0x4a8cff),
+                                    rgba(0x2a5ad8), rgba(0x1a3a98), rgba(0x2a5ad8));
+        dl->AddRect(ImVec2(bx - bw * 0.5f, by - bw * 0.8f), ImVec2(bx + bw * 0.5f, by), rgba(0x0c1a50), 0, 0, 2.5f * s);
+        dl->AddRectFilled(ImVec2(bx - bw * 0.08f, by - bw * 0.8f), ImVec2(bx + bw * 0.08f, by), rgba(0xffd84a));
+        float a = t * 2.0f, kc = fabsf(cosf(a)) * 0.9f + 0.1f;  // (the key turning: its bow seen edge-on and flat)
+        ImVec2 kb(bx + bw * 0.5f + bw * 0.15f, by - bw * 0.4f);
+        dl->AddLine(ImVec2(bx + bw * 0.5f, kb.y), kb, rgba(0xc8962a), 4 * s);
+        for (int side = -1; side <= 1; side += 2)
+            dl->AddEllipseFilled(ImVec2(kb.x + bw * 0.16f, kb.y + side * bw * 0.17f * kc), ImVec2(bw * 0.15f, bw * 0.16f * kc),
+                                 mix(rgba(0xa8781c), rgba(0xffe080), kc), 0, 20);
+        dl->AddCircleFilled(ImVec2(kb.x + bw * 0.16f, kb.y), bw * 0.06f, rgba(0x8a5e12), 12);
+        glow(dl, ImVec2(bx, by - bw * 0.4f), bw * 1.2f, rgba(0xfff0c0, 0.18f), rgba(0xfff0c0, 0.05f), 0.4f);
+    }
+    // bolts and a spanner on the yard, steel beams stacked
+    for (int i = 0; i < 3; i++) girder(dl, ImVec2(W * (0.08f + i * 0.015f), H * (0.95f - i * 0.04f)), ImVec2(W * (0.34f + i * 0.01f), H * (0.95f - i * 0.04f)), H * 0.035f, s);
+    // sparks drifting up from a welder on the second beam
+    ImVec2 weld(W * 0.66f, beam_y(1, 0.66f) - th * 0.5f);
+    glow(dl, weld, 26 * s * (0.8f + 0.2f * sinf(t * 23)), rgba(0xfff8e0, 0.9f), rgba(0x9ad8ff, 0.3f), 0.25f);
+    for (uint32_t i = 0; i < 40; i++) {
+        float life = fmodf(t * (0.6f + 0.5f * hash01(i * 4 + 500)) + hash01(i * 4 + 501), 1.0f);
+        float vx = (hash01(i * 4 + 502) - 0.5f) * 160 * s, vy = -(60 + 120 * hash01(i * 4 + 503)) * s;
+        ImVec2 p(weld.x + vx * life, weld.y + vy * life + 220 * s * life * life);
+        dl->AddCircleFilled(p, 2.0f * s * (1 - life) + 0.6f * s, rgba(0xffd070, 0.95f * (1 - life)), 6);
+    }
+    // dust in the low sun
+    for (uint32_t i = 0; i < 60; i++) {
+        float x = fmodf(hash01(i * 6 + 700) * W + t * (6 + 12 * hash01(i * 6 + 701)) * s, W + 40) - 20;
+        float y = H * (0.2f + 0.6f * hash01(i * 6 + 702)) + sinf(t * 0.8f + i) * 10 * s;
+        dl->AddCircleFilled(ImVec2(x, y), (0.8f + 1.4f * hash01(i * 6 + 703)) * s, rgba(0xffe6c0, 0.35f), 6);
+    }
+    // darker at the edges
+    ImU32 v = rgba(0x06040e, 0.55f), z = rgba(0x06040e, 0);
+    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(W, H * 0.18f), v, v, z, z);
+    dl->AddRectFilledMultiColor(ImVec2(0, H * 0.88f), sz, z, z, v, v);
+}
+
 void splash_draw(ImDrawList *dl, ImVec2 sz, float t) {
-    if (!g_tex) { forest_art(dl, sz, t); return; }
+    if (!g_tex) { girder_art(dl, sz, t); return; }
+    (void)forest_art;
     // the picture fills the window (cropped to its shape, centred)
     float ia = (float)g_tex_w / g_tex_h, da = sz.x / sz.y;
     ImVec2 uv0(0, 0), uv1(1, 1);
