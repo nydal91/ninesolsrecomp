@@ -36,8 +36,9 @@ static uint64_t nvn_proc(const char *name) {
     static int log = -1;  // SAVAGEWIND_NVN_LOG: every function the game looks up
     if (log < 0) log = getenv("SAVAGEWIND_NVN_LOG") != NULL;
     HostFn fn = hle_lookup_impl(name);
-    if (log) LOG("[nvn] proc %s%s\n", name, fn ? "" : " (not implemented)");
-    return hle_register(name, fn);
+    uint64_t a = hle_register(name, fn);
+    if (log) LOG("[nvn] proc %s %llx%s\n", name, (unsigned long long)a, fn ? "" : " (not implemented)");
+    return a;
 }
 
 HLE_FUNC("nvnBootstrapLoader", nvn_bootstrap_loader) {

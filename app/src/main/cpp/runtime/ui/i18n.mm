@@ -100,14 +100,14 @@ void refresh(void) {  // (lock held)
 }  // namespace
 
 // (MvDK) the app's name in every menu text: "Savage Wind" (the runtime's name, in the texts and their translations)
-// reads "MvDK Recomp". The renamed texts are kept for good (the returned pointers stay valid).
+// reads "Nine Sols Recomp". The renamed texts are kept for good (the returned pointers stay valid).
 static const char *rename_app(const char *s) {
     if (!strstr(s, "Savage Wind")) return s;
     static std::unordered_map<std::string, std::string> renamed;
     auto it = renamed.find(s);
     if (it == renamed.end()) {
         std::string r = s;
-        for (size_t at; (at = r.find("Savage Wind")) != std::string::npos;) r.replace(at, 11, "MvDK Recomp");
+        for (size_t at; (at = r.find("Savage Wind")) != std::string::npos;) r.replace(at, 11, "Nine Sols Recomp");
         it = renamed.emplace(s, std::move(r)).first;
     }
     return it->second.c_str();

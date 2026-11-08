@@ -10,4 +10,4 @@
 #pragma once
 
 #define GAME_VERSIONS(X)                     \
-    X("MvDK", "43ae51ee9766867d", 1, 3162)  /* Mario vs. Donkey Kong (2024): no System/Version.txt in its RomFS */
+    X("Nine Sols", "0240741fc426c6c4", 1, 1017)  /* Nine Sols (Unity 2022.3.33f1, IL2CPP): no System/Version.txt in its RomFS */

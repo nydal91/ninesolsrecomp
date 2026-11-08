@@ -160,7 +160,12 @@ const char *loader_symbol_at(uint64_t addr, uint64_t *offset) {
 static uint64_t resolve(Module *m, uint32_t symidx) {
     Elf64Sym *s = sym(m, symidx);
     const char *name = symname(m, s);
-    if (s->shndx) return m->base + s->value;
+    // As rtld: a global / weak symbol of default visibility binds to its first definition in load order (main
+    // first), even in a module that defines it too - ELF interposition. Nine Sols: main (Unity) has its own operator
+    // new / delete; the SDK's libc++ freed main's allocations through the SDK's own heap, which then broke into its
+    // debugger (CentralHeap::Free -> nnmem_nlib_debug_break). Hidden / protected / local ones stay the module's own.
+    uint8_t bind = s->info >> 4;
+    if (s->shndx && !((bind == 1 || bind == 2) && (s->other & 3) == 0)) return m->base + s->value;
     HostFn impl = hle_lookup_impl(name);
     if (impl) return hle_register(name, impl);  // host implementation wins over the guest SDK's
     uint64_t a = loader_find_symbol(name);

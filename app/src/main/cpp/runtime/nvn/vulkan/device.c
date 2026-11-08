@@ -511,6 +511,8 @@ static void create_device(void) {
     g_vk.feat_aniso = h->samplerAnisotropy;
     b->shaderStorageImageExtendedFormats = h->shaderStorageImageExtendedFormats;
     g_vk.storage_ext = h->shaderStorageImageExtendedFormats;
+    b->shaderStorageImageWriteWithoutFormat = h->shaderStorageImageWriteWithoutFormat;  // (guest SUST: maxwell IMG_BINDING)
+    if (!h->shaderStorageImageWriteWithoutFormat) LOG("[vk] warning: no shaderStorageImageWriteWithoutFormat (guest image stores)\n");
     b->textureCompressionBC = h->textureCompressionBC;
     // (textures.c samples ASTC images as they are wherever the driver lists the formats: the feature has to be on)
     b->textureCompressionASTC_LDR = h->textureCompressionASTC_LDR;

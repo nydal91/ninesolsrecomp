@@ -72,6 +72,7 @@ typedef struct {
     uint32_t noperspective_mask;  // fragment inputs the SPH interpolates linearly in screen space
     uint32_t omap_target, omap_depth;
     int tex_slot[8192];           // texture index -> Metal slot + 1
+    int img_slot[8];              // bound image slot -> ShaderInfo.img index + 1
     bool tex_weak[64];            // slot type only guessed (from a size query): the next sample decides
     bool fail;
     bool branchy;  // program uses the pc state machine
@@ -281,6 +282,7 @@ static const char *cc_test(int test) {
     case 21: case 30: return "(ccs || ccz)";      // SFT, RLE
     case 22: return "((cc & 1u) != 0u)";          // HS
     case 23: return "false";                      // OFT
+    case 24: case 25: case 26: case 27: case 28: case 29: return "false";  // (F)CSM_TA/TR/MX (yuzu: false; Unity VS)
     default: return NULL;
     }
 }
@@ -555,7 +557,9 @@ static int tex_slot(Ctx *c, uint32_t index, int type, bool shadow, bool array) {
     c->tex_slot[index] = s + 1;
     c->tex_weak[s] = weak;
     ShaderTexture *t = &c->info->tex[s];
-    t->handle_offset = index * 4;
+    // (4096 + texture index + 128 * sampler slot: a separate texture with a separate sampler, bindless_index)
+    t->handle_offset = index >= 4096 ? ((index - 4096) & 127) * 4 : index * 4;
+    t->sampler_slot = index >= 4096 ? (int8_t)((index - 4096) >> 7) : -1;
     t->type = (uint8_t)type;
     t->shadow = shadow;
     t->is_array = array;
@@ -857,6 +861,7 @@ static bool writes_gpr(uint64_t w) {
         {0xe300, 0xfff0}, {0xe330, 0xfff0}, {0xe240, 0xfff0}, {0xe250, 0xfff0},  // EXIT, KIL, BRA, BRX
         {0xe290, 0xfff0}, {0xe2a0, 0xfff0}, {0xe2b0, 0xfff0}, {0xe340, 0xfff0}, {0xe350, 0xfff0},  // SSY PBK PCNT BRK CONT
         {0xf0f8, 0xfff8}, {0xf0f0, 0xfff8}, {0x50b0, 0xfff8}, {0xef98, 0xfff8}, {0xf0a8, 0xfff8},  // SYNC DEPBAR NOP MEMBAR BAR
+        {0x50e0, 0xfff8},  // VOTE.VTG
     };
     uint16_t op = (uint16_t)(w >> 48);
     for (size_t i = 0; i < sizeof none / sizeof none[0]; i++)
@@ -884,9 +889,41 @@ static int bindless_index(Ctx *c, uint32_t pc, int r) {
             return (int)(bits(w, 20, 16) / 4);
         if (always && (w & 0xfff8000000000000ull) == 0x5c98000000000000ull && bits(w, 39, 4) == 0xf)  // MOV r, Rs
             return bindless_index(c, (uint32_t)(i * 8), (int)bits(w, 20, 8));
+        // Separate texture | separate sampler (Unity: LOP.OR r, Rt, c[2][0x568 + 8k] with Rt = c[2][0x168 + 8k]):
+        // NVN keeps the separate textures' handles at c[2][0x168..], their samplers' 0x400 above. The renderer binds
+        // separate texture k in slot k with the sampler of slot k merged in (vulkan/exec.c CMD_BIND_SAMPLERS), so
+        // this is the bound lookup of slot k.
+        // (also a predicated one: @P0 LOP.OR - the handle without its sampler otherwise, read as with it)
+        if ((w & 0xfff8000000000000ull) == 0x4c40000000000000ull && bits(w, 34, 5) == 2 &&
+            bits(w, 41, 2) == 1 && !bits(w, 39, 2)) {
+            uint32_t so = (uint32_t)bits(w, 20, 14) * 4;
+            int ti = bindless_index(c, (uint32_t)(i * 8), (int)bits(w, 8, 8));
+            uint32_t to = (uint32_t)ti * 4;
+            // (texture slot k, sampler slot j: not always the same one - Unity's TextMeshPro text)
+            if (ti >= 0 && so >= 0x568 && so < 0x668 && to >= 0x168 && to < 0x268)
+                return 4096 + (int)((0x20 + (to - 0x168)) / 4) + 128 * (int)((so - 0x568) / 8);
+        }
         return -1;  // written by something else
     }
     return -1;
+}
+
+// (bring-up) the instruction that last wrote r before pc, and those of its two register sources: for the log
+static void writer_chain(Ctx *c, uint32_t pc, int r, char *out, size_t n, int depth) {
+    const uint64_t *code = (const uint64_t *)c->code;
+    for (int64_t i = (int64_t)(pc / 8) - 1; i >= 0 && (int64_t)(pc / 8) - i < 512; i--) {
+        if (i % 4 == 0) continue;
+        uint64_t w = code[i];
+        if ((int)bits(w, 0, 8) != r || !writes_gpr(w)) continue;
+        size_t l = strlen(out);
+        snprintf(out + l, n - l, " [R%d@%#x=%016llx]", r, (unsigned)(i * 8), (unsigned long long)w);
+        if (depth < 2) {
+            int a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
+            if (a != RZ) writer_chain(c, (uint32_t)(i * 8), a, out, n, depth + 1);
+            if (b != RZ && b != a) writer_chain(c, (uint32_t)(i * 8), b, out, n, depth + 1);
+        }
+        return;
+    }
 }
 
 static int dim_type(int dim) {  // TexDim (bits 28-30: array bit, then 1d / 2d / 3d / cube)
@@ -1059,7 +1096,12 @@ static void emit_tex(Ctx *c, uint64_t w, uint32_t pc, bool bindless) {
     bool array = bits(w, 28, 1), dc = bits(w, 50, 1), aoffi = bindless ? bits(w, 36, 1) : bits(w, 54, 1);
     uint32_t mask = (uint32_t)bits(w, 31, 4);
     int lod_mode = bindless ? (int)bits(w, 37, 3) : (int)bits(w, 55, 3);  // 0 none, 1 lz, 2 lb, 3 ll, 6 lba, 7 lla
-    if (bindless && (bi < 0 || bi >= 8192)) { fail(c, "bindless tex (handle not from c[2])"); return; }
+    if (bindless && (bi < 0 || bi >= 8192)) {
+        char ch[600] = "";
+        writer_chain(c, pc, (int)bits(w, 20, 8), ch, sizeof ch, 0);
+        fail(c, "bindless tex (handle not from c[2]) at %#x:%s", pc, ch);
+        return;
+    }
     if (bindless) b = b == RZ ? RZ : b + 1;
     int type = target == 0 ? (array ? TEXTYPE_1D_ARRAY : TEXTYPE_1D)
              : target == 1 ? (array ? TEXTYPE_2D_ARRAY : TEXTYPE_2D)
@@ -1186,8 +1228,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0xe350000000000000ull, 0xfff0000000000000ull)) {  // CONT
         sp(&c->body, "    pc = pcnt[pcnt_n - 1]; continue;\n");
     } else if (OPM(0xf0f0000000000000ull, 0xfff8000000000000ull) || OPM(0x50b0000000000000ull, 0xfff8000000000000ull) ||
-               OPM(0xef98000000000000ull, 0xfff8000000000000ull)) {
-        // DEPBAR / NOP / MEMBAR
+               OPM(0xef98000000000000ull, 0xfff8000000000000ull) || OPM(0x50e0000000000000ull, 0xfff8000000000000ull)) {
+        // DEPBAR / NOP / MEMBAR / VOTE.VTG (a vertex-stage hint: Unity's vertex shaders end with it)
     } else if (OPM(0xe00000000000ff00ull, 0xff0000400000ff00ull) || OPM(0xe000004000000000ull, 0xff00004000000000ull)) {
         // IPA: interpolate fragment input
         bool idx = bits(w, 38, 1);
@@ -1959,6 +2001,39 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         sp(&c->body, "    }\n");
     } else if (OPM(0x5098000000000000ull, 0xfff8000000000000ull)) {  // CSET
         fail(c, "cset");
+    } else if (OPM(0xeb20000000000000ull, 0xffe0000000000000ull)) {  // SUST
+        // Formatted stores (SUST.P: the data registers for the components in the mask, as floats) into an image bound
+        // in slot k: the handle at c[2][0x120 + 8k] (bound: TidB, bindless: the register loaded from there). Unity's
+        // post-processing bakes its colour-grading LUT (a 33^3 RGBA16F volume) this way.
+        if (!c->glsl) { fail(c, "sust outside vulkan"); return; }
+        if (bits(w, 52, 1)) { fail(c, "sust.d (raw stores) at %#x", pc); return; }
+        int ity = (int)bits(w, 33, 3);  // 0 1D, 1 buffer, 2 1D array, 3 2D, 4 2D array, 5 3D
+        int widx = bits(w, 51, 1) ? (int)bits(w, 36, 13) : bindless_index(c, pc, (int)bits(w, 39, 8));
+        int off = widx * 4 - 0x120;
+        if (widx < 0 || off < 0 || off >= 8 * 8 || (off & 7) || ity == 1) { fail(c, "sust image (type %d handle %d) at %#x", ity, widx, pc); return; }
+        int slot = off / 8;
+        static const uint8_t ttype[6] = {TEXTYPE_1D, TEXTYPE_BUFFER, TEXTYPE_1D_ARRAY, TEXTYPE_2D, TEXTYPE_2D_ARRAY, TEXTYPE_3D};
+        int ii = c->img_slot[slot] - 1;
+        if (ii < 0) {
+            if (c->info->nimg >= 8) { fail(c, "too many images"); return; }
+            ii = c->info->nimg++;
+            c->img_slot[slot] = ii + 1;
+            c->info->img[ii].slot = (uint8_t)slot;
+            c->info->img[ii].type = ttype[ity];
+        } else if (c->info->img[ii].type != ttype[ity]) {
+            fail(c, "image slot %d used as two types", slot); return;
+        }
+        int ra = (int)bits(w, 8, 8), rd = (int)bits(w, 0, 8), nco = ity == 0 ? 1 : ity == 5 || ity == 4 ? 3 : 2;
+        char co[160] = "", v[4][48];
+        for (int k = 0; k < nco; k++)
+            sprintf(co + strlen(co), "%sint(%s)", k ? ", " : "", R(ra == RZ ? RZ : ra + k));
+        uint32_t mask = (uint32_t)bits(w, 20, 4);
+        for (int k = 0, n = 0; k < 4; k++) {
+            if (mask & (1u << k)) sprintf(v[k], "%s", R(rd == RZ ? RZ : rd + n++));
+            else strcpy(v[k], k == 3 ? "0x3f800000u" : "0u");
+        }
+        sp(&c->body, "    imageStore(img%d, %s%s%s, uintBitsToFloat(uvec4(%s, %s, %s, %s)));\n", ii, nco > 1 ? (nco == 3 ? "ivec3(" : "ivec2(") : "",
+           co, nco > 1 ? ")" : "", v[0], v[1], v[2], v[3]);
     } else if (OPM(0xf0a8000000000000ull, 0xfff8000000000000ull)) {  // BAR
         if (!c->glsl) sp(&c->body, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
         else if (c->stage == STAGE_COMPUTE) sp(&c->body, "    barrier();\n");
@@ -2335,6 +2410,11 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (tint) {
         sp(&s, "layout(std140, set = %d, binding = 19) uniform Tint { vec4 ltint[2]; };\n", set);
         info->uses_tint = true;
+    }
+    for (int i = 0; i < info->nimg; i++) {
+        static const char *const it[] = {[TEXTYPE_1D] = "image1D", [TEXTYPE_2D] = "image2D", [TEXTYPE_3D] = "image3D",
+                                         [TEXTYPE_2D_ARRAY] = "image2DArray", [TEXTYPE_1D_ARRAY] = "image1DArray"};
+        sp(&s, "layout(set = %d, binding = %d) uniform writeonly %s img%d;\n", set, IMG_BINDING + i, it[info->img[i].type], i);
     }
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];

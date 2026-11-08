@@ -2,7 +2,22 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <setjmp.h>
 #include <string.h>
+
+// C++ exceptions (Nine Sols: IL2CPP throws them for managed exceptions). The guest's libunwind finds the handler
+// and ends in its jumpto, which loads the landing pad's registers and returns into it: recompiled code can't
+// resume in the middle of a C function, so a guest function with landing pads (tools/gen.py) records each of its
+// C frames that makes calls here, with a host jmp_buf, and makes every landing pad a function entry of its own.
+// The HLE jumpto (runtime/hle/unwind.c) longjmps to the frame of the function the pad belongs to, which then
+// calls the pad's function and returns as the guest frame would have.
+typedef struct RtEhFrame {
+    struct RtEhFrame *prev;
+    uint64_t lo, hi;  // the guest function (its FDE range)
+    uint64_t sp;      // guest sp when this C function was entered
+    uint64_t start;   // 1: entered at the guest function's start (its sp then is the frame's CFA)
+    jmp_buf jb;
+} RtEhFrame;
 
 typedef struct __attribute__((aligned(16))) Cpu {
     uint64_t x[32];          // x0-x30 (x[31] unused; sp is separate)
@@ -16,7 +31,9 @@ typedef struct __attribute__((aligned(16))) Cpu {
     void *thread;            // 312: runtime thread object
     uint64_t fpcr;           // 320: guest FPCR/FPSR (portable FP/SIMD lowering only; the asm path uses the host's)
     uint64_t fpsr;           // 328
-    uint8_t _pad[512 - 336];
+    uint64_t excl_val2;      // 336: the high half an exclusive pair load saw (LDXP / STXP)
+    RtEhFrame *eh_top;       // 344: this thread's innermost recorded frame with landing pads
+    uint8_t _pad[512 - 352];
     __uint128_t v[32];       // 512
 } Cpu;
 
@@ -95,6 +112,33 @@ EXCL(8, uint8_t)
 EXCL(16, uint16_t)
 EXCL(32, uint32_t)
 EXCL(64, uint64_t)
+
+// Exclusive pairs (LDXP / STXP, LDAXP / STLXP): the two registers as one 64-bit (W pair) or 128-bit (X pair) value,
+// with the same compare-and-swap emulation. (Nine Sols: Unity's 128-bit atomics, e.g. a 16-byte atomic store of zero)
+static inline void ldxp64(Cpu *c, uint64_t a, uint64_t *lo, uint64_t *hi) {
+    __uint128_t v = __atomic_load_n((__uint128_t *)(uintptr_t)a, __ATOMIC_ACQUIRE);
+    c->excl_addr = a;
+    c->excl_val = (uint64_t)v;
+    c->excl_val2 = (uint64_t)(v >> 64);
+    *lo = (uint64_t)v;
+    *hi = (uint64_t)(v >> 64);
+}
+static inline uint32_t stxp64(Cpu *c, uint64_t a, uint64_t lo, uint64_t hi) {
+    if (c->excl_addr != a) return 1;
+    c->excl_addr = ~0ull;
+    __uint128_t expected = ((__uint128_t)c->excl_val2 << 64) | c->excl_val;
+    __uint128_t v = ((__uint128_t)hi << 64) | lo;
+    return !__atomic_compare_exchange_n((__uint128_t *)(uintptr_t)a, &expected, v, 0, __ATOMIC_SEQ_CST,
+                                        __ATOMIC_SEQ_CST);
+}
+static inline void ldxp32(Cpu *c, uint64_t a, uint64_t *lo, uint64_t *hi) {
+    uint64_t v = ldx64(c, a);
+    *lo = (uint32_t)v;
+    *hi = v >> 32;
+}
+static inline uint32_t stxp32(Cpu *c, uint64_t a, uint64_t lo, uint64_t hi) {
+    return stx64(c, a, (uint64_t)(uint32_t)lo | hi << 32);
+}
 
 // ---- flags (packed NZCV in bits 31..28)
 #define FLAG_N(c) (((c)->nzcv >> 31) & 1)

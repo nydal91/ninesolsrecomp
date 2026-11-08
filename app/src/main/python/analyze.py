@@ -165,3 +165,107 @@ if __name__ == '__main__':
         c, bad = census(n, words)
         print(f'instructions: {sum(c.values())}  undecodable words: {bad}  distinct mnemonics: {len(c)}')
         print(' '.join(f'{m}:{k}' for m, k in c.most_common()))
+
+
+def _read_enc(img, off, enc, pc_base=0):
+    """read_encoded plus the LEB128 / 2-byte formats LSDAs use: (value, next offset)"""
+    fmt = enc & 0x0F
+    if fmt == 0x01:
+        return uleb128(img, off)
+    if fmt == 0x09:
+        v = shift = 0
+        while True:
+            b = img[off]
+            off += 1
+            v |= (b & 0x7F) << shift
+            shift += 7
+            if not b & 0x80:
+                break
+        if b & 0x40:
+            v -= 1 << shift
+        return v, off
+    if fmt in (0x02, 0x0A):
+        v = struct.unpack_from('<H' if fmt == 0x02 else '<h', img, off)[0]
+        return v + (off if enc & 0x70 == 0x10 else 0), off + 2
+    v, size = read_encoded(img, off, enc, pc_base)
+    return v, off + size
+
+
+def eh_landing_pads(n):
+    """{FDE function start: set of landing pads} (image offsets) for every function whose FDE has an LSDA with a
+    landing pad (C++ catch / cleanup code: reached only by the unwinder's jump, never by a branch). {} if .eh_frame
+    isn't readable."""
+    img, hdr = n.image, n.eh_start
+    out = {}
+    if not hdr or hdr >= len(img):
+        return out
+    try:
+        ver, ptr_enc, cnt_enc, tbl_enc = img[hdr:hdr + 4]
+        off = hdr + 4
+        _, sz = read_encoded(img, off, ptr_enc, hdr)
+        off += sz
+        count, sz = read_encoded(img, off, cnt_enc, hdr)
+        off += sz
+        cies = {}  # CIE -> (augmentation, FDE pointer encoding, LSDA pointer encoding)
+        for _ in range(count):
+            loc, sz = read_encoded(img, off, tbl_enc, hdr)
+            off += sz
+            fde, sz = read_encoded(img, off, tbl_enc, hdr)
+            off += sz
+            cie = fde + 4 - struct.unpack_from('<I', img, fde + 4)[0]
+            if cie not in cies:
+                o = cie + 8
+                version = img[o]
+                aug_end = img.index(b'\0', o + 1)
+                aug = img[o + 1:aug_end].decode()
+                _, o = uleb128(img, aug_end + 1)
+                _, o = uleb128(img, o)
+                o = o + 1 if version == 1 else uleb128(img, o)[1]
+                enc, lenc = 0, 0xFF
+                if aug.startswith('z'):
+                    _, o = uleb128(img, o)
+                    for ch in aug[1:]:
+                        if ch == 'R':
+                            enc = img[o]
+                            o += 1
+                        elif ch == 'P':
+                            o = _read_enc(img, o + 1, img[o])[1]
+                        elif ch == 'L':
+                            lenc = img[o]
+                            o += 1
+                cies[cie] = (aug, enc, lenc)
+            aug, enc, lenc = cies[cie]
+            if 'L' not in aug or lenc == 0xFF:
+                continue
+            pc, o = _read_enc(img, fde + 8, enc)
+            _, o = _read_enc(img, o, enc & 0x0F)
+            _, o = uleb128(img, o)  # augmentation data length (the LSDA pointer is all of it)
+            lsda, _ = _read_enc(img, o, lenc)
+            if not lsda or pc != loc:
+                continue
+            o = lsda
+            lp_enc = img[o]
+            o += 1
+            lpstart = pc
+            if lp_enc != 0xFF:
+                lpstart, o = _read_enc(img, o, lp_enc)
+            tt_enc = img[o]
+            o += 1
+            if tt_enc != 0xFF:
+                _, o = uleb128(img, o)
+            cs_enc = img[o]
+            cs_len, o = uleb128(img, o + 1)
+            end = o + cs_len
+            pads = set()
+            while o < end:
+                _, o = _read_enc(img, o, cs_enc)
+                _, o = _read_enc(img, o, cs_enc)
+                lp, o = _read_enc(img, o, cs_enc)
+                _, o = uleb128(img, o)
+                if lp:
+                    pads.add(lpstart + lp)
+            if pads:
+                out[pc] = pads
+        return out
+    except (ValueError, IndexError, struct.error):
+        return out

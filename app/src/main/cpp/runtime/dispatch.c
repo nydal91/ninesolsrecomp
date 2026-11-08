@@ -164,7 +164,8 @@ static GuestFn dispatch_slow(Cpu *c) {
 // Always tail-calls, so chains of indirect jumps don't grow the host stack.
 void rt_dispatch(Cpu *c) {
     KThread *t = c->thread;  // (a better thread waiting for this one's core gets it: kernel.c kernel_preempt)
-    if (t && t->core_held >= 0 && __builtin_expect(g_core_best_wait[t->core_held].v < t->prio, 0)) kernel_preempt(t);
+    if (t && __builtin_expect(t->paused || (t->core_held >= 0 && g_core_best_wait[t->core_held].v < t->prio), 0))
+        kernel_preempt(t);  // (also a thread another one paused: it parks here)
     unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);
     GuestFn f = dcache[h].addr == c->pc ? dcache[h].fn : dispatch_slow(c);
     __attribute__((musttail)) return f(c);
@@ -378,6 +379,17 @@ void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {
     fprintf(stderr, "\n*** %s accessing %#llx\n    host pc %llx (%s+%llx)\n    host lr %llx (%s)\n", what,
             (unsigned long long)fa, (unsigned long long)pc, ps ? ps : "?", (unsigned long long)po,
             (unsigned long long)lr, ls ? ls : "?");
+    // SAVAGEWIND_FAULT_DUMP=<addr>[,<addr>...] (bring-up): the guest words at these addresses when it happened -
+    // function pointer slots, globals (the game's NVN function table, Nine Sols)
+    if (getenv("SAVAGEWIND_FAULT_DUMP")) {
+        char buf[512];
+        snprintf(buf, sizeof buf, "%s", getenv("SAVAGEWIND_FAULT_DUMP"));
+        for (char *t = strtok(buf, ","); t; t = strtok(NULL, ",")) {
+            uint64_t a = strtoull(t, NULL, 16);
+            if (a >= GUEST_LO && a + 8 <= GUEST_HI)
+                fprintf(stderr, "    [%llx] = %llx\n", (unsigned long long)a, (unsigned long long)*(uint64_t *)(uintptr_t)a);
+        }
+    }
     rt_fatal_trace();
 }
 

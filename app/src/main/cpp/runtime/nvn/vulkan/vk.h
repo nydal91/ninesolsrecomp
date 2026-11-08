@@ -107,6 +107,7 @@ typedef struct TexBackend {
     VkImageAspectFlags aspect;
     bool gpu_owned, uploaded, dynamic;
     bool slices_renderable;  // 3D image made 2D-array compatible: its slices are render targets
+    bool storage;            // made with storage usage (NVN's IMAGE flag: exec.c storage_image_info)
     bool not_attachable;     // made without a color or depth/stencil attachment usage (vk_view: no render view)
     bool cube_ok;            // made cube compatible: cube and cube-array views allowed
     bool feedback_ok;        // made with VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT (sampled while it is rendered to)
@@ -163,6 +164,7 @@ VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uin
 VkFormat vk_view_format(TexBackend *b, VkFormat want);  // want, or the image's own format where want is not listed
 void vk_texture_drop_format_list(NvnTexture *t);        // (textures.c) a feedback loop target: no format list
 VkImageView vk_dummy_view(int textype);
+VkImageView vk_dummy_storage_view(int textype);  // (RGBA8, storage usage: stores into it go nowhere)
 void vk_block_flush(VkCommandBuffer cb, TexBackend *b);  // (outside a pass) b->block's texels into b's blocks
 VkSampler vk_sampler(NvnSamplerDesc *d, bool aniso_ok, float bias);  // (aniso_ok: Video > Anisotropic filtering may
                                                                      //  apply; bias: added to the LOD bias)

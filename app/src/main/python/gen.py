@@ -34,7 +34,7 @@ from unicorn import arm64_const as A
 import game_sites
 import layout
 import patches
-from analyze import eh_frame_extents, eh_frame_functions
+from analyze import eh_frame_extents, eh_frame_functions, eh_landing_pads
 from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx, sext
 from nso import Nso, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE, header
 
@@ -61,6 +61,31 @@ def setjmp_call(t, ret):
             f'if (!setjmp(*hb_)) {{ c->x[30] = {hx(ret)}; {fname(t)}(c); }} }}')
 
 
+# Runtime hooks run after a game function returns: (module, address, the words expected at address+0, +0x14, +0x18,
+# runtime function). The function's own C body becomes <name>_body and <name> calls it, then hook(c, x0, x1) with x0
+# and x1 as they were on entry (out-pointers). Matched by code: another build of the game just doesn't get it.
+POST_HOOKS = [
+    # Nine Sols (Unity 2022.3): GetScreenResolution(int *w, int *h) - wide screens (runtime/hle/unity_wide.c)
+    ('main', 0x7000c73964, (0xA9BC7BFD, 0x5280A017, 0x52805A16), 'rt_unity_screen_resolution'),
+    # Matrix4x4f::SetOrtho(m, left, right, bottom, top, near, far) - the 2D cameras' wide view (unity_wide.c rt_unity_ortho)
+    ('main', 0x70007c0a68, (0x1E203830, 0xB9002C1F, 0x1E2438B2), 'rt_unity_ortho'),
+    # Matrix4x4f::SetPerspective(m, fovy, aspect, near, far) - the same for the perspective cameras (parallax layers)
+    ('main', 0x70007c094c, (0xFC1C0FEC, 0x9100A3FD, 0x1E20402A), 'rt_unity_persp'),
+]
+
+# One instruction replaced by C, for games without tools/game_sites.py sites: (module, address, the word expected there,
+# C). Matched by the word: another build of the game just doesn't get it.
+INSN_PATCHES = [
+    # Nine Sols: the display (window) textures' width, `mov w1, #1920` before nvnTextureBuilderSetSize(b, 1920, 1080) -
+    # the width runtime/hle/unity_wide.c gave the back buffer, which Unity copies into them
+    ('main', 0x7000c88e48, 0x5280F001, '{ extern uint32_t rt_unity_display_width(void); c->x[1] = rt_unity_display_width(); }'),
+    ('main', 0x7000c890b0, 0x5280F001, '{ extern uint32_t rt_unity_display_width(void); c->x[1] = rt_unity_display_width(); }'),
+    ('main', 0x7000c88ee4, 0x5280F001, '{ extern uint32_t rt_unity_display_width(void); c->x[1] = rt_unity_display_width(); }'),
+    # the render surface the back buffer is presented through (CreateRenderSurface(.., 1920, 1080, ..), kept at +0x1e68)
+    ('main', 0x7000c73ad0, 0x5280F002, '{ extern uint32_t rt_unity_display_width(void); c->x[2] = rt_unity_display_width(); }'),
+]
+
+
 def sanitize(sym):
     return 'hle_' + re.sub(r'[^A-Za-z0-9_]', '_', sym)
 
@@ -82,9 +107,16 @@ class Module:
         # the functions as compiled: discovery may split one into several C functions, a jump table spans all of it
         self.fdes = sorted((base + a, base + b) for a, b in eh_frame_extents(n) if b > a)
         self.fde_starts = [a for a, _ in self.fdes]
+        # C++ landing pads, by FDE function (runtime/cpu.h RtEhFrame): each one a function entry of its own
+        self.lpads = {base + f: {base + p for p in ps} for f, ps in eh_landing_pads(n).items()}
         self.jt_cache = {}
         self.setjmps = self.setjmp_targets()
         self.sites, self.patches = {}, {}  # (main: tools/game_sites.py, tools/patches.py)
+        self.post_hooks = {}
+        for mod, a, ws, hook in POST_HOOKS:
+            if mod == name and self.in_text(a) and a + 0x18 < self.hi and \
+                    (self.word(a), self.word(a + 0x14), self.word(a + 0x18)) == ws:
+                self.post_hooks[a] = hook
 
     def in_text(self, a):
         return self.lo <= a < self.hi and a % 4 == 0
@@ -98,6 +130,26 @@ class Module:
 
     def word(self, a):
         return self.words[(a - self.lo) // 4]
+
+    def eh_frame_of(self, entry, end):
+        """The FDE range a C function entry..end records as an exception frame (runtime/cpu.h RtEhFrame), or None:
+        part of a guest function with landing pads, and it makes calls (a piece that doesn't is never the frame
+        an exception passes through)."""
+        f = self.fde(entry)
+        if f is None or f[0] not in self.lpads:
+            return None
+        if not any(self.lift(a).kind in ('bl', 'blr') for a in range(entry, end, 4)):
+            return None
+        return f
+
+    def is_unwind_jumpto(self, entry):
+        """libunwind's __libunwind_Registers_arm64_jumpto: ldp x2, x3, [x0, #0x10] ... mov sp, x16; ret"""
+        if not self.in_text(entry) or self.word(entry) != 0xA9410C02:
+            return False
+        for a in range(entry, min(entry + 0x200, self.hi), 4):
+            if self.word(a) == 0xD65F03C0:
+                return self.word(a - 4) == 0x9100021F
+        return False
 
     def setjmp_targets(self):
         """Addresses whose call is a call to setjmp: the function itself (a module defining it) and the PLT stubs
@@ -142,6 +194,8 @@ class Module:
         for off, typ, sym, add in n.relocs:
             if typ == R_AARCH64_RELATIVE:
                 starts.add(b + add)
+        for pads in self.lpads.values():
+            starts |= pads
         starts = sorted(a for a in starts if self.in_text(a))
         return starts
 
@@ -221,8 +275,10 @@ class Module:
     def _guard_cmp(self, guard, lo):
         """The `cmp idx, #imm` that sets the flags a bounds check at guard tests, or None. Only straight-line
         code without other flag writes may come in between (cbz/tbz included: the compiler interleaves them)."""
+        # (up to 32 back: IL2CPP state machines zero a dozen locals between the cmp and its b.hi - Nine Sols'
+        # save loading, main 0x7001e424d8)
         a = guard - 4
-        while a >= lo and guard - a <= 4 * 12:
+        while a >= lo and guard - a <= 4 * 32:
             w = self.word(a)
             if (w & 0x7F80001F) == 0x7100001F:  # SUBS (imm) with Rd = zr, i.e. CMP #imm
                 return None if bits(w, 22, 1) else a
@@ -427,18 +483,36 @@ class Module:
             out += self._emit_body(entry, end, labels, tables, refs, 'fast')
             out += self._emit_body(entry, end, labels, tables, refs, 'resume')
         self._refs = refs
+        hook = self.post_hooks.get(entry)
+        if hook:
+            head = f'void {fname(entry)}(Cpu *c) {{'
+            i = out.index(head)
+            out[i] = f'static void {fname(entry)}_body(Cpu *c) {{'
+            out += [f'void {hook}(Cpu *c, uint64_t x0, uint64_t x1);',
+                    head, '    uint64_t x0 = c->x[0], x1 = c->x[1];', f'    {fname(entry)}_body(c);',
+                    f'    {hook}(c, x0, x1);', '}']
+            print(f'{self.name}: post hook {hook} at {entry:#x}', file=sys.stderr)
         return out
 
     def _emit_body(self, entry, end, labels, tables, refs, mode):
         """One C function for entry..end. mode: 'plain' (the all-instruction fallback inside when it has tables),
         'fast' (a table miss goes on in <name>_r) or 'resume' (<name>_r: from c->pc, through that fallback)."""
+        eh = self.eh_frame_of(entry, end)
         if mode == 'resume':
             # (optnone: optimized, its switch made the copy as slow to build as the function used to be, and it is
             # never run in practice. Unoptimized, its frame can reach ~250 KB: guest threads have 256 MB host stacks)
             head = f'__attribute__((cold, noinline, optnone)) static void {fname(entry)}_r(Cpu *c) {{'
-            out = [head, '    goto L_dispatch;']
+            out = [head]
         else:
             out = [f'void {fname(entry)}(Cpu *c) {{', f'    FN_ENTER({hx(entry)});']
+        if eh:
+            # (a landing: runtime/hle/unwind.c set c->pc to the pad, a function of its own, and popped this record)
+            out.append(f'    RtEhFrame eh_; eh_.lo = {hx(eh[0])}; eh_.hi = {hx(eh[1])}; eh_.sp = c->sp; '
+                       f'eh_.start = {int(entry == eh[0])}; eh_.prev = c->eh_top; c->eh_top = &eh_;')
+            out.append('    if (__builtin_expect(_setjmp(eh_.jb), 0)) { rt_dispatch(c); return; }')
+        body_from = len(out)
+        if mode == 'resume':
+            out.append('    goto L_dispatch;')
         batch = []
 
         def flush():
@@ -523,6 +597,11 @@ class Module:
             cases = ' '.join(f'case {hx(t)}: goto L_{t:x};' for t in range(entry, end, 4))
             out.append(f'    switch (c->pc) {{ {cases} default: break; }}')
             out.append('    __attribute__((musttail)) return rt_dispatch(c);')
+        if eh:  # every way out of the C function pops the record
+            for i in range(body_from, len(out)):
+                l = re.sub(r'__attribute__\(\(musttail\)\) return ([^;]*);',
+                           r'{ c->eh_top = eh_.prev; __attribute__((musttail)) return \1; }', out[i])
+                out[i] = re.sub(r'(?<![\w.])return;', '{ c->eh_top = eh_.prev; return; }', l)
         out.append('}')
         return out
 
@@ -554,7 +633,24 @@ def discover(m, starts):
     # there instead, a jump table's base: as a boundary it would split the function away from its table.
     def own_label(pc, t):
         f = m.fde(pc)
-        return f is not None and f[0] < t < f[1]
+        if f is not None:
+            return f[0] < t < f[1]
+        return table_base(pc)
+
+    def table_base(pc):
+        """Code without an FDE (Nine Sols: a printf-like formatter in main): an ADR that is a jump table's base -
+        its register goes into an ADD (shifted / extended register) whose result a BR within a few instructions
+        jumps to. A boundary there split the function from its table: the table's targets then lay outside the
+        piece holding the BR, which went to the dispatcher and found no function (FATAL "no function at")."""
+        i = (pc - m.lo) // 4
+        reg, added = m.words[i] & 31, False
+        for k in range(i + 1, min(i + 8, len(m.words))):
+            w = m.words[k]
+            if (w & 0x1F000000) == 0x0B000000 and ((w >> 5) & 31 == reg or (w >> 16) & 31 == reg):  # ADD (reg)
+                reg, added = w & 31, True
+            elif (w & 0xFFFFFC1F) == 0xD61F0000:  # BR
+                return added and (w >> 5) & 31 == reg
+        return False
 
     adrp_regs = {}
     for i, w in enumerate(m.words):
@@ -618,6 +714,10 @@ def generate(name, nso, base, outdir, opts, sites=None):
     if name == 'main':
         m.sites = sites if sites is not None else main_sites(m.nso, base, opts)[1]
         m.patches = patches.table(m.sites) if m.sites and not opts.no_sites else {}
+    for mod, a, w, code in INSN_PATCHES:
+        if mod == name and m.in_text(a) and m.word(a) == w:
+            m.patches[a] = (lambda code: lambda gen, a: code + f'  /* {a:#x} */')(code)
+            print(f'{name}: patch at {a:#x}', file=sys.stderr)
     starts = m.boundaries()
     hle = {}
     if opts.hle and os.path.exists(opts.hle):
@@ -627,6 +727,10 @@ def generate(name, nso, base, outdir, opts, sites=None):
                 hle[base + value] = sym
 
     entries, rounds = discover(m, starts)
+    for a in entries:
+        if m.is_unwind_jumpto(a):
+            hle[a] = 'rt_unwind_jumpto'
+            print(f'{name}: libunwind jumpto at {a:#x}', file=sys.stderr)
     print(f'{name}: {len(starts)} boundaries, {len(entries)} functions, {rounds} rounds, {dict(m.stats)}, '
           f'{time.time() - t0:.0f}s', file=sys.stderr)
 
@@ -672,7 +776,7 @@ def generate(name, nso, base, outdir, opts, sites=None):
         # (the start screen's setup reads these for its progress bar: runtime/gamebuild.c)
         print(f'{name}: progress {ci}/{len(order)} files {nchunks}', file=sys.stderr, flush=True)
     for fn in os.listdir(outdir):  # an earlier run's extra chunks
-        mm = re.fullmatch(re.escape(name) + r'_(\d{3})\.c', fn)
+        mm = re.fullmatch(re.escape(name) + r'_(\d{3,})\.c', fn)
         if mm and int(mm.group(1)) >= nchunks:
             os.remove(os.path.join(outdir, fn))
     import io

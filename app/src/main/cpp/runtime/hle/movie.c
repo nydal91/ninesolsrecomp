@@ -71,6 +71,20 @@ HLE_FUNC("_ZN5movie9MediaDataD1Ev", md_dtor) {
     if (m) { md_clear(m); free(m); }
     *(uint64_t *)(uintptr_t)c->x[0] = 0;
 }
+HLE_FUNC("_ZN5movie9MediaDataaSERKS0_", md_assign) {  // (Unity: the track's configuration copied into its own)
+    MediaData *src = md(c->x[1]), *dst = md(c->x[0]);
+    if (src != dst) {
+        md_clear(dst);
+        for (int i = 0; i < src->n; i++) {
+            dst->e[i].key = strdup(src->e[i].key);
+            dst->e[i].sval = src->e[i].sval ? strdup(src->e[i].sval) : NULL;
+            dst->e[i].ival = src->e[i].ival;
+            dst->e[i].is_str = src->e[i].is_str;
+        }
+        dst->n = src->n;
+        dst->codecpar = src->codecpar;
+    }
+}
 HLE_FUNC("_ZN5movie9MediaData5ClearEv", md_clear_hle) { md_clear(md(c->x[0])); }
 HLE_FUNC("_ZNK5movie9MediaData9FindInt32EPKcPi", md_find_int32) {
     MediaData *m = md(c->x[0]);
@@ -80,6 +94,27 @@ HLE_FUNC("_ZNK5movie9MediaData9FindInt32EPKcPi", md_find_int32) {
     for (int i = 0; i < m->n; i++)
         if (!m->e[i].is_str && !strcmp(m->e[i].key, k)) { *(int32_t *)(uintptr_t)c->x[2] = (int32_t)m->e[i].ival; c->x[0] = 1; return; }
     c->x[0] = 0;
+}
+HLE_FUNC("_ZNK5movie9MediaData9FindInt64EPKcPl", md_find_int64) {
+    MediaData *m = md(c->x[0]);
+    const char *k = (const char *)(uintptr_t)c->x[1];
+    for (int i = 0; i < m->n; i++)
+        if (!m->e[i].is_str && !strcmp(m->e[i].key, k)) { *(int64_t *)(uintptr_t)c->x[2] = m->e[i].ival; c->x[0] = 1; return; }
+    c->x[0] = 0;
+}
+// FindRect(key, left, top, right, bottom): only "crop" is asked for - the whole picture (inclusive, as Android's)
+HLE_FUNC("_ZNK5movie9MediaData8FindRectEPKcPiS3_S3_S3_", md_find_rect) {
+    MediaData *m = md(c->x[0]);
+    int64_t w = 0, h = 0;
+    for (int i = 0; i < m->n; i++)
+        if (!m->e[i].is_str && !strcmp(m->e[i].key, "width")) w = m->e[i].ival;
+        else if (!m->e[i].is_str && !strcmp(m->e[i].key, "height")) h = m->e[i].ival;
+    if (w <= 0 || h <= 0) { c->x[0] = 0; return; }
+    *(int32_t *)(uintptr_t)c->x[2] = 0;
+    *(int32_t *)(uintptr_t)c->x[3] = 0;
+    *(int32_t *)(uintptr_t)c->x[4] = (int32_t)w - 1;
+    *(int32_t *)(uintptr_t)c->x[5] = (int32_t)h - 1;
+    c->x[0] = 1;
 }
 HLE_FUNC("_ZNK5movie9MediaData10FindStringEPKcPS2_", md_find_string) {
     MediaData *m = md(c->x[0]);
@@ -121,6 +156,7 @@ HLE_FUNC("_ZN5movie6BufferD1Ev", buf_dtor) { (void)c; }
 HLE_FUNC("_ZNK5movie6Buffer4BaseEv", buf_base) { c->x[0] = BUF(c->x[0])->base; }
 HLE_FUNC("_ZNK5movie6Buffer4SizeEv", buf_size) { c->x[0] = (uint32_t)BUF(c->x[0])->size; }
 HLE_FUNC("_ZNK5movie6Buffer6OffsetEv", buf_offset) { c->x[0] = (uint32_t)BUF(c->x[0])->offset; }
+HLE_FUNC("_ZNK5movie6Buffer4DataEv", buf_data) { c->x[0] = BUF(c->x[0])->base + (uint32_t)BUF(c->x[0])->offset; }
 HLE_FUNC("_ZNK5movie6Buffer8CapacityEv", buf_capacity) { c->x[0] = BUF(c->x[0])->capacity; }
 HLE_FUNC("_ZN5movie6Buffer8SetRangeEii", buf_set_range) { BUF(c->x[0])->offset = (int32_t)c->x[1]; BUF(c->x[0])->size = (int32_t)c->x[2]; }
 HLE_FUNC("_ZN5movie6Buffer18SetDataAndCapacityEPvm", buf_set_data) {
@@ -137,6 +173,7 @@ HLE_FUNC("_ZN5movie6Buffer12SetInt32DataEi", buf_set_i32) { BUF(c->x[0])->i32 = 
 HLE_FUNC("_ZN5movie12SetAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_", movie_set_allocator) { (void)c; }
 HLE_FUNC("_ZN5movie17SetThreadPriorityEi", movie_set_thread_priority) { (void)c; }
 HLE_FUNC("_ZN5movie17GetThreadPriorityEv", movie_get_thread_priority) { c->x[0] = 16; }
+HLE_FUNC("_ZN5movie11SetCoreMaskEm", movie_set_core_mask) { (void)c; }
 
 // ------------------------------------------------------------------ helpers
 static uint64_t make_vtable(HostFn *fns, int n, const char *prefix) {
@@ -396,6 +433,14 @@ EX_LOCKED(ex_cached_duration)
 EX_LOCKED(ex_set_data_source)
 EX_LOCKED(ex_set_data_source_path)
 
+// (Unity's player calls these directly; other games through the vtable)
+HLE_FUNC("_ZN5movie9ExtractorD1Ev", movie_extractor_dtor) { ex_dtor_l(c); }
+HLE_FUNC("_ZN5movie9Extractor13SetDataSourceEPKc", movie_extractor_set_source) { ex_set_data_source_path_l(c); }
+HLE_FUNC("_ZN5movie9Extractor13GetTrackCountEPi", movie_extractor_track_count) { ex_get_track_count_l(c); }
+HLE_FUNC("_ZN5movie9Extractor21GetTrackConfigurationEiPNS_9MediaDataE", movie_extractor_track_config) {
+    ex_get_track_config_l(c);
+}
+
 HLE_FUNC("_ZN5movie9ExtractorC1ENS_13ContainerTypeE", movie_extractor_ctor) {
     uint64_t vt = g_ex_vt;
     if (!vt) {
@@ -554,7 +599,10 @@ volatile int g_movie_fps = 30;
 
 bool movie_paced(void) {
     static int on = -1;
-    if (on < 0) on = !getenv("SAVAGEWIND_MOVIE_PACE") || atoi(getenv("SAVAGEWIND_MOVIE_PACE")) != 0;
+    // (Nine Sols: off unless SAVAGEWIND_MOVIE_PACE=1. Unity's player asks for its pictures on the main thread and
+    // paces them by their time itself: held here, the whole game ran at 15-28 fps and Unity dropped every picture
+    // as late - the opening movie stood still)
+    if (on < 0) on = getenv("SAVAGEWIND_MOVIE_PACE") && atoi(getenv("SAVAGEWIND_MOVIE_PACE")) != 0;
     return on;
 }
 
@@ -766,6 +814,13 @@ static void dec_acquire_output(Cpu *c) {
     }
     memmove(d->ready, d->ready + 1, --d->nready * sizeof *d->ready);
     int remaining = d->nready;
+    if (d->video && getenv("SAVAGEWIND_MOVIE_DEBUG")) {  // (picture time against the wall clock)
+        static int64_t t0;
+        static int n;
+        int64_t now = av_gettime_relative();
+        if (!t0) t0 = now;
+        if (n++ % 30 == 0) LOG("[movie] out #%d time %.3f s at %.3f s (%d ready)\n", n, r.time / 1e6, (now - t0) / 1e6, remaining);
+    }
     pthread_mutex_unlock(&d->lock);
     *(int32_t *)(uintptr_t)c->x[1] = r.idx;
     if (c->x[2]) *(int64_t *)(uintptr_t)c->x[2] = r.time;
@@ -774,6 +829,26 @@ static void dec_acquire_output(Cpu *c) {
     c->x[0] = 0;
 }
 
+static void dec_get_output_buffer(Cpu *c);
+// slot 17: GetOutputBuffer(int index, Buffer *, MediaData *format) - Unity's player: the picture and its format
+// (width, height, crop: without them it dropped every frame and drew nothing while a movie played)
+static void dec_get_output_buffer_with_format(Cpu *c) {
+    Decoder *d = self_state(c);
+    uint64_t fmt = c->x[3];
+    dec_get_output_buffer(c);
+    if (!fmt || c->x[0]) return;
+    MediaData *m = md(fmt);
+    dec_output_format(d, m);
+    MBuffer *b = BUF(c->x[2]);
+    if (d->video && b->base != (uint64_t)(uintptr_t)d->out_mem[0] && b->size == d->width * d->height * 3 / 2) {
+        md_set_int(m, "nv12-y-stride", d->width);  // (packed into the game's own buffer: dec_get_output_buffer)
+        md_set_int(m, "nv12-uv-offset", (int64_t)d->width * d->height);
+    }
+    md_set_int(m, "crop-left", 0);
+    md_set_int(m, "crop-top", 0);
+    md_set_int(m, "crop-right", d->width - 1);
+    md_set_int(m, "crop-bottom", d->height - 1);
+}
 static void dec_get_output_buffer(Cpu *c) {
     Decoder *d = self_state(c);
     n_get_out++;
@@ -896,7 +971,7 @@ HLE_FUNC("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11Dec
         HostFn f[19] = {dec_dtor, dec_dtor, dec_configure, dec_register_events, dec_get_output_format,
                         dec_start, dec_stop, ok, ok, dec_acquire_input, dec_get_input_buffer, dec_send_input,
                         dec_acquire_output, dec_get_output_buffer, dec_get_counts, dec_release_output, ok,
-                        movie_log_slot, dec_get_output_buffer_format};
+                        dec_get_output_buffer_with_format, dec_get_output_buffer_format};
         vt = g_dec_vt = make_vtable(f, 19, "Decoder");
     }
     uint64_t *self = (uint64_t *)(uintptr_t)c->x[0];

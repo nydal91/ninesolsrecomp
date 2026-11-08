@@ -1,4 +1,4 @@
-// On-screen touch controls (Controls > Touch controls, off by default).
+// On-screen touch controls (Controls > Touch controls; on by default on Android).
 //
 // The screen, in units of its height (x from 0 to its aspect, y from 0 at the top to 1):
 //   - the Switch's buttons where a Switch has them: A B X Y at the bottom right, the d-pad right of the left stick,
@@ -45,6 +45,9 @@ static int layout(float a, Btn *b) {
     // which the game doesn't use)
     b[n++] = (Btn){BIND_L, "L", 0.10f, 0.42f, 0.065f};
     b[n++] = (Btn){BIND_R, "R", a - 0.10f, 0.36f, 0.065f};
+    // (Nine Sols: ZL / ZR too, above L and R)
+    b[n++] = (Btn){BIND_ZL, "ZL", 0.10f, 0.24f, 0.065f};
+    b[n++] = (Btn){BIND_ZR, "ZR", a - 0.10f, 0.18f, 0.065f};
     b[n++] = (Btn){BIND_MINUS, "-", a * 0.5f - 0.10f, 0.07f, 0.045f};
     b[n++] = (Btn){BIND_PLUS, "+", a * 0.5f + 0.10f, 0.07f, 0.045f};
     const float dx = 0.60f, dy = 0.80f, d = 0.085f, dr = 0.05f;  // d-pad

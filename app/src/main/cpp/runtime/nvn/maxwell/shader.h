@@ -15,6 +15,8 @@
 //  - per-draw tint -> binding 19: `uniform Tint { vec4 ltint[2]; };` (fragment, when uses_tint).
 //  - texture slot i (ShaderInfo.tex[i]) -> binding 32 + i, a combined image sampler: sampler1D/2D/3D/Cube/
 //    1DArray/2DArray/CubeArray, or its *Shadow variant when tex[i].shadow.
+//  - image i (ShaderInfo.img[i], SUST.P) -> binding 96 + i, `writeonly image1D/2D/3D/2DArray` without a format
+//    (shaderStorageImageWriteWithoutFormat); stores take the data registers as floats.
 //  - vertex inputs `layout(location=i) in vec4|ivec4|uvec4 a<i>;` (key->attr_kind); varyings: location i =
 //    generic attribute i, `vec4 v<i>` (fragment side flat / noperspective as in MSL); `invariant gl_Position`;
 //    gl_PointSize when writes_point_size. Fragment outputs `layout(location=rt) out vec4|ivec4|uvec4 c<rt>;`,
@@ -63,6 +65,7 @@ typedef struct {
     uint8_t type;            // TEXTYPE_*
     bool shadow, is_array, is_image, bindless;
     uint32_t bindless_cbuf, bindless_offset;
+    int8_t sampler_slot;     // separate sampler slot (NVN separate texture + sampler handles), -1: the handle's own
 } ShaderTexture;
 
 typedef struct {
@@ -75,6 +78,8 @@ typedef struct {
     uint32_t cbuf_rows_all;     // cbufs read at an index, or past vec4 255: any of their vec4s may be read
     int ntex;
     ShaderTexture tex[64];
+    int nimg;               // storage images (SUST): image i -> binding IMG_BINDING + i, `uniform writeonly image<T> img<i>`
+    struct { uint8_t slot, type; } img[8];  // the bound image slot (c[2][0x120 + 8 * slot]), TEXTYPE_*
     uint32_t attr_mask;     // vertex: input attributes; fragment: input varyings
     uint32_t out_mask;      // vertex: output varyings; fragment: render targets written
     bool writes_depth, uses_discard, writes_point_size;
@@ -94,6 +99,7 @@ typedef struct {
 
 // Global memory (LDG/STG) is addressed through one buffer that wraps the guest heap.
 #define GMEM_BUFFER_INDEX 17
+#define IMG_BINDING 96  // storage images (ShaderInfo.img)
 // Android (Adreno): binding 17 is a table - the heap's 256 MB pieces' buffer device addresses and the words mapped - and
 // global memory is read through those addresses (no host-pointer import, 128 MB storage buffer ranges there; Qualcomm's
 // gralloc aborts on hardware buffers of 512 MB or more)

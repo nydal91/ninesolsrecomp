@@ -96,7 +96,10 @@ void output_scale(double dw, double dh, bool reshape_allowed, OutScale *o) {
     // (#125); the HUD keeps its 16:9 layout in the middle either way. The start screen and its menus, a 16:9 layout
     // over 16:9 pictures with no world to show more of, keep the 16:9 picture with bars, and so does the loading screen
     // (#98: widened, its tip went to the window's edges and its logo stayed in the 16:9 middle).
-    bool reshape = reshape_allowed && fabs(shape - 1.0) > 0.005 && !framepace_title_ui() && !framepace_loading_ui();
+    // (and a movie: a 16:9 picture the widened view would only stretch - Nine Sols' cutscenes)
+    extern volatile int g_movie_playing;
+    bool reshape = reshape_allowed && fabs(shape - 1.0) > 0.005 && !framepace_title_ui() && !framepace_loading_ui() &&
+                   __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) <= 0;
     if (!reshape) shape = 1.0;
     // render height in units of the Switch's 1080 lines: the window's (Metal: divided by the upscaler's factor)
 #ifdef __APPLE__

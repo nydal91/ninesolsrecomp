@@ -26,6 +26,7 @@
 
 const char *g_romfs_dir;
 uint64_t g_program_id;
+uint64_t g_system_resource_size;
 
 // rtld normally passes these to nn::init::Start: run every module's init/fini arrays.
 static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
@@ -180,6 +181,14 @@ static void boot(const char *root) {
     char why[512];
     if (!gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
     loader_load(exefs);
+    // rtld points nn::ro::detail::g_pLookupGlobalManualFunctionPointer at its own slot for the symbol lookup of
+    // modules nn::ro loads; nn::ro::Initialize stores LookupGlobalManual through it (Nine Sols' nnMain calls it
+    // first thing). There is no rtld here: a slot of ours (guest addresses are host addresses), else a store to 0.
+    {
+        static uint64_t lookup_slot;
+        uint64_t p = loader_find_symbol("_ZN2nn2ro6detail36g_pLookupGlobalManualFunctionPointerE");
+        if (p && !*(uint64_t *)(uintptr_t)p) *(uint64_t *)(uintptr_t)p = (uint64_t)(uintptr_t)&lookup_slot;
+    }
     { extern void fs_title_version_patch(void); fs_title_version_patch(); }  // (runtime/services/fs.c)
     { extern void settings_load(void); settings_load(); }
     { extern void language_booted(void); language_booted(); }  // (runtime/language.c)
@@ -197,12 +206,16 @@ static void boot(const char *root) {
         if (n >= 0x80 && !memcmp(npdm, "META", 4)) {
             prio = npdm[0xE];
             stack_size = *(uint32_t *)(npdm + 0x1C);
+            // (Nine Sols: 8 MB. Non-zero turns on the SDK's virtual address memory - nn::os::AllocateAddressRegion,
+            // AllocateMemoryPages - which Unity's baselib reserves its address space with: kernel.c GetInfo 16)
+            g_system_resource_size = *(uint32_t *)(npdm + 0x14);
             uint32_t aci = *(uint32_t *)(npdm + 0x70);  // ACI0: the program id at +0x10
             if (aci + 0x18 <= n && !memcmp(npdm + aci, "ACI0", 4)) g_program_id = *(uint64_t *)(npdm + aci + 0x10);
         }
         fclose(f);
     }
-    LOG("main thread: prio %d, stack 0x%x, program %016llx\n", prio, stack_size, (unsigned long long)g_program_id);
+    LOG("main thread: prio %d, stack 0x%x, program %016llx, system resource 0x%llx\n", prio, stack_size,
+        (unsigned long long)g_program_id, (unsigned long long)g_system_resource_size);
 
     // nn::init::Start(thread_handle, args_region, init_sdk, init_main[, fini_main]): with x4 in newer SDKs
     uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_S2_");
@@ -344,13 +357,13 @@ int main(int argc, char **argv) {
         char text[600];
         snprintf(text, sizeof text,
                  "The memory range the game needs (%llx-%llx) is already in use by Android on this boot.\n\n"
-                 "Restart the phone and open Savage Wind again. If it keeps happening after several restarts, "
+                 "Restart the phone and open Nine Sols Recomp again. If it keeps happening after several restarts, "
                  "this device doesn't have the address space layout the game needs.",
                  (unsigned long long)GUEST_LO, (unsigned long long)GUEST_HI);
         fprintf(stderr, "FATAL: guest address range %llx-%llx is not free\n", (unsigned long long)GUEST_LO,
                 (unsigned long long)GUEST_HI);
         fflush(stderr);
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Savage Wind", text, NULL);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Nine Sols Recomp", text, NULL);
         _exit(1);  // (not exit: see reserve_guest_space)
     }
 #endif
@@ -366,7 +379,7 @@ int main(int argc, char **argv) {
     control_init();
     const char *root = "extracted";  // (in the data root)
     bool skip_launcher = getenv("SAVAGEWIND_NO_LAUNCHER") || getenv("SAVAGEWIND_INPUT");  // tests boot straight in
-    bool config = false;
+    bool config = getenv("SAVAGEWIND_LAUNCHER") != NULL;  // (tests: the start screen even with the game ready)
     static char arg_root[PATH_MAX];  // (bionic fortify: realpath needs PATH_MAX)
     const char *dump = NULL;
     bool scan = false, precompile = false;

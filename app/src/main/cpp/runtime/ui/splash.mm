@@ -1,6 +1,6 @@
 // The start screen's background (splash.h). The player's own picture when there is one (rt_user_splash: splash.jpg /
-// splash.png in the data folder, decoded with stb_image), shown filling the window; else MvDK Recomp's own art
-// (girder_art: a building site at sunset). Savage Wind's forest art is kept below (forest_art): an old forest at a sunlit clearing, the icon's plain sword (docs/icon/icon.svg) in a mossy stone, the grass
+// splash.png in the data folder, decoded with stb_image), shown filling the window; else Nine Sols Recomp's own art
+// (sol_art: nine suns over misty mountains; MvDK's girder_art is kept below). Savage Wind's forest art is kept below (forest_art): an old forest at a sunlit clearing, the icon's plain sword (docs/icon/icon.svg) in a mossy stone, the grass
 // swaying, petals and fireflies. The menu sits on the left, so the clearing is on the right. The start screen lays its
 // dark banners over either, which keep its text readable.
 #ifdef __APPLE__
@@ -573,9 +573,131 @@ static void girder_art(ImDrawList *dl, ImVec2 sz, float t) {
     dl->AddRectFilledMultiColor(ImVec2(0, H * 0.88f), sz, z, z, v, v);
 }
 
+// ------------------------------------------------------------------ Nine Sols Recomp's own art
+// Drawn here, nothing of the game's: a night over misty mountains, nine suns in an arc on the right (one great one
+// with a halo, eight small ones pulsing), a cliff with a pagoda and lanterns, its rock veined with glowing circuit
+// lines, and peach petals drifting. The menu sits on the left, so the suns and the cliff are on the right.
+static float ridge(float x, uint32_t seed, float W) {  // a mountain line: a few sines of seeded phase, 0..1
+    float u = x / W, v = 0;
+    for (int k = 0; k < 4; k++) {
+        float f = 1.5f + k * 2.3f + hash01(seed + k) * 1.5f;
+        v += sinf(u * f * 6.2831853f + hash01(seed + 10 + k) * 6.28f) / (1 + k * 1.4f);
+    }
+    return 0.5f + 0.25f * v;
+}
+
+static void mountains(ImDrawList *dl, float W, float H, float base, float amp, uint32_t seed, ImU32 top, ImU32 bottom) {
+    const int N = 96;
+    for (int i = 0; i < N; i++) {
+        float x0 = W * i / N - 1, x1 = W * (i + 1) / N + 1;
+        float y0 = base - amp * ridge(x0, seed, W), y1 = base - amp * ridge(x1, seed, W);
+        quad_grad(dl, ImVec2(x0, y0), ImVec2(x1, y1), ImVec2(x1, H), ImVec2(x0, H), top, top, bottom, bottom);
+    }
+}
+
+static void sol_art(ImDrawList *dl, ImVec2 sz, float t) {
+    float W = sz.x, H = sz.y, s = H / 720.0f;
+    // sky: deep teal-black above, a crimson dusk low on the right
+    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(W, H * 0.45f), rgba(0x050b14), rgba(0x0a1424), rgba(0x182238), rgba(0x101a2c));
+    dl->AddRectFilledMultiColor(ImVec2(0, H * 0.45f), ImVec2(W, H), rgba(0x101a2c), rgba(0x182238), rgba(0x7a2230), rgba(0x2a1a2a));
+    for (uint32_t i = 0; i < 90; i++) {  // stars
+        float k = 0.5f + 0.5f * sinf(t * (0.7f + hash01(i * 3 + 7)) + i);
+        ImVec2 p(hash01(i * 3 + 5) * W, hash01(i * 3 + 6) * H * 0.5f);
+        dl->AddCircleFilled(p, (0.7f + 1.1f * hash01(i * 3 + 8)) * s, rgba(0xe8f4ff, (0.2f + 0.6f * k) * (1 - p.y / (H * 0.5f))), 6);
+    }
+    // the nine suns: one great sun, eight small ones on an arc around it
+    ImVec2 sun(W * 0.72f, H * 0.34f);
+    glow(dl, sun, H * 0.62f, rgba(0xffc860, 0.45f), rgba(0xff5a3a, 0.12f), 0.28f);
+    float R = H * 0.085f;
+    for (int ring = 0; ring < 3; ring++)  // its halo: thin rings turning slowly
+        dl->AddCircle(sun, R * (1.55f + ring * 0.32f), rgba(0xffd88a, 0.30f - ring * 0.08f), 96, (2.2f - ring * 0.5f) * s);
+    for (int i = 0; i < 12; i++) {  // ticks on the inner ring, like a dial
+        float a = i * 6.2831853f / 12 + t * 0.05f;
+        ImVec2 d(cosf(a), sinf(a));
+        dl->AddLine(ImVec2(sun.x + d.x * R * 1.42f, sun.y + d.y * R * 1.42f), ImVec2(sun.x + d.x * R * 1.68f, sun.y + d.y * R * 1.68f),
+                    rgba(0xffd88a, 0.35f), 2 * s);
+    }
+    dl->AddCircleFilled(sun, R, rgba(0xffe6a8), 64);
+    dl->AddCircleFilled(sun, R * 0.82f, rgba(0xfff3d0), 64);
+    for (int i = 0; i < 8; i++) {
+        float a = 3.1415926f * (1.08f + 0.84f * i / 7.0f), rr = H * 0.27f;  // (an arc over the top)
+        ImVec2 p(sun.x + cosf(a) * rr * 1.25f, sun.y + sinf(a) * rr);
+        float pulse = 0.75f + 0.25f * sinf(t * 1.3f + i * 0.8f), r = H * (0.018f + 0.006f * hash01(i + 900));
+        glow(dl, p, r * 4.5f * pulse, rgba(0xffb050, 0.55f), rgba(0xff6040, 0.15f), 0.3f);
+        dl->AddCircleFilled(p, r, rgba(0xffe2a0), 24);
+    }
+    // mountains, far to near, with mist between them
+    mountains(dl, W, H, H * 0.70f, H * 0.30f, 11, rgba(0x2a3a52), rgba(0x1a2a3c));
+    dl->AddRectFilledMultiColor(ImVec2(0, H * 0.52f), ImVec2(W, H * 0.72f), rgba(0x8aa6c0, 0), rgba(0xc07080, 0), rgba(0x8aa6c0, 0.22f), rgba(0xc07080, 0.25f));
+    mountains(dl, W, H, H * 0.80f, H * 0.26f, 37, rgba(0x18283a), rgba(0x0e1a28));
+    for (int i = 0; i < 3; i++) {  // mist drifting
+        float y = H * (0.70f + i * 0.05f), x = fmodf(t * (8 + i * 5) * s + i * W * 0.3f, W * 1.6f) - W * 0.3f;
+        glow(dl, ImVec2(x, y), H * (0.30f + i * 0.05f), rgba(0xb8c8d8, 0.10f), rgba(0xb8c8d8, 0.04f), 0.5f);
+    }
+    mountains(dl, W, H, H * 0.92f, H * 0.16f, 71, rgba(0x0c1622), rgba(0x060c14));
+    // the cliff on the right, with the pagoda on top
+    float cx = W * 0.86f, ctop = H * 0.56f;
+    {
+        ImVec2 c[] = {ImVec2(W * 0.74f, H), ImVec2(W * 0.77f, H * 0.80f), ImVec2(W * 0.79f, H * 0.66f), ImVec2(W * 0.81f, ctop + H * 0.01f),
+                      ImVec2(W * 0.92f, ctop), ImVec2(W * 0.94f, H * 0.68f), ImVec2(W * 0.97f, H * 0.82f), ImVec2(W * 1.01f, H)};
+        fill_grad(dl, c, 8, ImVec2(cx, ctop), ImVec2(cx, H), rgba(0x101c28), rgba(0x04080e));
+        // circuit lines in the rock: right-angled traces with nodes, a pulse running along them
+        for (int i = 0; i < 7; i++) {
+            float x = W * (0.80f + 0.02f * i + 0.01f * hash01(i + 40)), y = H * (0.70f + 0.04f * hash01(i + 50) + 0.03f * i);
+            if (y > H * 0.98f) y = H * 0.98f;
+            float len = H * (0.06f + 0.06f * hash01(i + 60)), up = H * (0.04f + 0.05f * hash01(i + 70));
+            ImVec2 a(x, y), b(x + len * (i % 2 ? 1 : -1) * 0.6f, y), c2(b.x, y - up);
+            float pulse = 0.5f + 0.5f * sinf(t * 2.0f - i * 0.9f);
+            ImU32 lc = rgba(0x3ae0d0, 0.25f + 0.45f * pulse);
+            dl->AddLine(a, b, lc, 1.6f * s), dl->AddLine(b, c2, lc, 1.6f * s);
+            dl->AddCircleFilled(a, 2.6f * s, rgba(0x7af8ec, 0.5f + 0.5f * pulse), 10);
+            glow(dl, c2, 7 * s, rgba(0x7af8ec, 0.7f * pulse), rgba(0x3ae0d0, 0.2f * pulse), 0.3f);
+        }
+    }
+    {   // the pagoda: three tiers of upswept roofs
+        ImU32 body = rgba(0x0a121c), roof = rgba(0x140e18);
+        float bw = H * 0.075f, y = ctop;
+        for (int tier = 0; tier < 3; tier++) {
+            float w = bw * (1 - tier * 0.22f), h = H * (0.05f - tier * 0.006f);
+            dl->AddRectFilled(ImVec2(cx - w * 0.5f, y - h), ImVec2(cx + w * 0.5f, y), body);
+            for (int wi = -1; wi <= 1; wi += 2)  // lit windows
+                dl->AddRectFilled(ImVec2(cx + wi * w * 0.22f - 2.5f * s, y - h * 0.7f), ImVec2(cx + wi * w * 0.22f + 2.5f * s, y - h * 0.3f),
+                                  rgba(0xffb050, 0.65f + 0.2f * sinf(t * 3 + tier + wi)));
+            y -= h;
+            float rw = w * 0.95f, rh = H * 0.022f;
+            ImVec2 r[] = {ImVec2(cx - rw, y + rh * 0.2f - rh * 0.6f), ImVec2(cx - rw * 0.7f, y), ImVec2(cx + rw * 0.7f, y),
+                          ImVec2(cx + rw, y + rh * 0.2f - rh * 0.6f), ImVec2(cx + rw * 0.55f, y - rh), ImVec2(cx - rw * 0.55f, y - rh)};
+            fill(dl, r, 6, roof);
+            y -= rh;
+        }
+        dl->AddLine(ImVec2(cx, y), ImVec2(cx, y - H * 0.04f), roof, 2.5f * s);
+        glow(dl, ImVec2(cx, y - H * 0.045f), 9 * s, rgba(0xff5040, 0.9f), rgba(0xff3020, 0.25f), 0.3f);
+    }
+    // lanterns floating up
+    for (uint32_t i = 0; i < 9; i++) {
+        float life = fmodf(t * (0.025f + 0.02f * hash01(i * 5 + 800)) + hash01(i * 5 + 801), 1.0f);
+        float x = W * (0.45f + 0.5f * hash01(i * 5 + 802)) + sinf(t * 0.5f + i) * 12 * s, y = H * (0.95f - 0.85f * life);
+        float a = life < 0.1f ? life * 10 : life > 0.8f ? (1 - life) * 5 : 1, r = (4 + 3 * hash01(i * 5 + 803)) * s;
+        glow(dl, ImVec2(x, y), r * 4, rgba(0xffa040, 0.45f * a), rgba(0xff6020, 0.12f * a), 0.3f);
+        dl->AddRectFilled(ImVec2(x - r * 0.7f, y - r), ImVec2(x + r * 0.7f, y + r), rgba(0xffc070, 0.9f * a), r * 0.4f);
+    }
+    // peach petals drifting from the right
+    for (uint32_t i = 0; i < 45; i++) {
+        float sp = 0.04f + 0.05f * hash01(i * 7 + 600), life = fmodf(t * sp + hash01(i * 7 + 601), 1.0f);
+        float x = W * (1.05f - 1.2f * life) + sinf(t * 1.1f + i) * 20 * s, y = H * (hash01(i * 7 + 602) * 0.7f + 0.35f * life);
+        float rot = t * (1 + hash01(i * 7 + 603)) + i, r = (3 + 3 * hash01(i * 7 + 604)) * s;
+        dl->AddEllipseFilled(ImVec2(x, y), ImVec2(r, r * 0.5f * (0.4f + 0.6f * fabsf(cosf(rot)))), rgba(0xffa8c0, 0.8f), rot, 10);
+    }
+    // darker at the edges
+    ImU32 v = rgba(0x02040a, 0.6f), z = rgba(0x02040a, 0), vt = rgba(0x02040a, 0.25f);
+    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(W, H * 0.10f), vt, vt, z, z);  // (light: the suns are up there)
+    dl->AddRectFilledMultiColor(ImVec2(0, H * 0.86f), sz, z, z, v, v);
+    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(W * 0.35f, H), v, z, z, v);
+}
+
 void splash_draw(ImDrawList *dl, ImVec2 sz, float t) {
-    if (!g_tex) { girder_art(dl, sz, t); return; }
-    (void)forest_art;
+    if (!g_tex) { sol_art(dl, sz, t); return; }
+    (void)forest_art, (void)girder_art;
     // the picture fills the window (cropped to its shape, centred)
     float ia = (float)g_tex_w / g_tex_h, da = sz.x / sz.y;
     ImVec2 uv0(0, 0), uv1(1, 1);

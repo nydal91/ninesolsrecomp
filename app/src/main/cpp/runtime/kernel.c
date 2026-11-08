@@ -159,7 +159,9 @@ static void core_best_update(Core *k) {  // (k->m held)
 }
 
 static bool cores_on(void) {
-    if (g_cores_on < 0) g_cores_on = !(getenv("SAVAGEWIND_CORES") && !strcmp(getenv("SAVAGEWIND_CORES"), "0"));
+    // (Nine Sols: off unless SAVAGEWIND_CORES=1 - Unity's job workers stalled the game at boot in about half the runs
+    // with the four core tokens; Unity locks what it shares, and thread pausing doesn't need them: KThread.safe)
+    if (g_cores_on < 0) g_cores_on = getenv("SAVAGEWIND_CORES") && !strcmp(getenv("SAVAGEWIND_CORES"), "1");
     return g_cores_on;
 }
 
@@ -172,7 +174,29 @@ static bool core_next(Core *k, KThread *t) {
     return true;
 }
 
+// ------------------------------------------------------------------ thread pausing (svcSetThreadActivity)
+static pthread_mutex_t g_pause_m = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_pause_cv = PTHREAD_COND_INITIALIZER;
+static void pause_park(KThread *t) {  // (holding no core) wait while another thread has this one paused
+    if (!__atomic_load_n(&t->paused, __ATOMIC_ACQUIRE)) return;
+    pthread_mutex_lock(&g_pause_m);
+    while (__atomic_load_n(&t->paused, __ATOMIC_ACQUIRE) && !g_rt_unwind) pthread_cond_wait(&g_pause_cv, &g_pause_m);
+    pthread_mutex_unlock(&g_pause_m);
+}
+
+static void core_release(KThread *t);
+static void core_acquire(KThread *t);
+// A paused thread (svcSetThreadActivity) at a safe point: off its core, it waits until it is resumed.
+static void park_if_paused(KThread *t) {
+    if (!t || !__atomic_load_n(&t->paused, __ATOMIC_ACQUIRE)) return;
+    bool had = t->core_held >= 0;
+    core_release(t);
+    pause_park(t);
+    if (had) core_acquire(t);
+}
+
 static void core_acquire(KThread *t) {
+    if (t && !t->off_cores && t->core_held < 0) pause_park(t);
     if (!t || !cores_on() || t->core_held >= 0 || t->off_cores) return;
     static int one_core = -1;  // (debug) SAVAGEWIND_ONE_CORE=1: every thread on core 0, one guest thread at a time
     if (one_core < 0) one_core = getenv("SAVAGEWIND_ONE_CORE") != NULL;
@@ -236,6 +260,7 @@ void kernel_host_work_end(void) {
 // At a syscall: give the core to a better thread waiting for it, if there is one.
 static void core_preempt_point(KThread *t) {
     if (!t || t->core_held < 0) return;
+    if (__builtin_expect(__atomic_load_n(&t->paused, __ATOMIC_RELAXED), 0)) { core_release(t); core_acquire(t); return; }
     Core *k = &g_cores[t->core_held];
     if (!__atomic_load_n(&k->nwaiting, __ATOMIC_RELAXED)) return;
     pthread_mutex_lock(&k->m);
@@ -252,6 +277,12 @@ static void core_preempt_point(KThread *t) {
 // the same core, which the main thread was waiting for, waited for the core (a ~10 ms longer frame every second).
 // dispatch.c calls this at every indirect call (a safe point: the guest state is all in Cpu).
 void kernel_preempt(KThread *t) {
+    if (__builtin_expect(__atomic_load_n(&t->paused, __ATOMIC_RELAXED), 0)) {
+        __atomic_add_fetch(&t->safe, 1, __ATOMIC_RELEASE);  // (paused by another thread: park here, a safe point)
+        park_if_paused(t);
+        __atomic_sub_fetch(&t->safe, 1, __ATOMIC_RELEASE);
+        return;
+    }
     if (t->core_held < 0 || __atomic_load_n(&g_core_best_wait[t->core_held].v, __ATOMIC_RELAXED) >= t->prio) return;
     core_release(t);
     core_acquire(t);
@@ -333,9 +364,59 @@ static bool region_remove(uint64_t addr) {  // (false: no region starts there)
     return false;
 }
 
+// ------------------------------------------------------------------ physical memory in the alias region
+// MapPhysicalMemory / UnmapPhysicalMemory (the SDK's virtual address memory, nn::os::AllocateMemoryPages): as on
+// the console, mapping a range maps only its pages that aren't mapped yet - the ones that are keep what they hold.
+// The SDK's heap writes its own header into the first page of a region and then maps the whole region over it
+// (nn::nlibsdk::heap::TlsHeapCentral::Init): zeroing everything again wiped that header. One bit per alias page.
+static uint8_t g_phys_bits[ALIAS_SIZE / 0x1000 / 8];
+static pthread_mutex_t g_phys_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool phys_bit(uint64_t pg) { return g_phys_bits[pg >> 3] >> (pg & 7) & 1; }
+
+static uint32_t phys_map(uint64_t addr, uint64_t size, bool map) {
+    if (addr < ALIAS_BASE || addr + size > ALIAS_BASE + ALIAS_SIZE || addr + size < addr || (addr | size) & 0xFFF)
+        return R_INVALID_ADDRESS;
+    pthread_mutex_lock(&g_phys_lock);
+    uint64_t first = (addr - ALIAS_BASE) >> 12, n = size >> 12;
+    for (uint64_t i = 0; i < n;) {
+        uint64_t j = i;
+        while (j < n && phys_bit(first + j) != map) j++;  // a run of pages to change
+        if (j > i) {
+            plat_decommit(ALIAS_BASE + ((first + i) << 12), (j - i) << 12);  // (new pages read as zero; freed ones go back)
+            for (uint64_t k = i; k < j; k++) {
+                uint64_t pg = first + k;
+                if (map) g_phys_bits[pg >> 3] |= (uint8_t)(1u << (pg & 7));
+                else g_phys_bits[pg >> 3] &= (uint8_t)~(1u << (pg & 7));
+            }
+        }
+        while (j < n && phys_bit(first + j) == map) j++;  // (already as asked)
+        i = j;
+    }
+    pthread_mutex_unlock(&g_phys_lock);
+    return R_OK;
+}
+
+// QueryMemory in the alias region: the run of mapped physical pages around addr (false: addr isn't in one)
+static bool phys_query(uint64_t addr, uint64_t info[5]) {
+    if (addr < ALIAS_BASE || addr >= ALIAS_BASE + ALIAS_SIZE) return false;
+    uint64_t pg = (addr - ALIAS_BASE) >> 12, total = ALIAS_SIZE >> 12;
+    if (!phys_bit(pg)) return false;
+    uint64_t a = pg, b = pg;
+    while (a > 0 && phys_bit(a - 1)) a--;
+    while (b + 1 < total && phys_bit(b + 1)) b++;
+    info[0] = ALIAS_BASE + (a << 12);
+    info[1] = (b - a + 1) << 12;
+    info[2] = 7;  // (Normal memory: what MapPhysicalMemory gives)
+    info[3] = 3;  // (RW)
+    return true;
+}
+
+RT_ON_RESET(phys_reset) { memset(g_phys_bits, 0, sizeof g_phys_bits); }
+
 static void query_memory(uint64_t addr, uint64_t out) {
     uint64_t prev_end = 0;
     uint64_t info[5] = {0};  // addr, size, type|attr<<32, perm|ipc<<32, device|pad<<32
+    if (phys_query(addr, info)) { memcpy((void *)out, info, 0x28); return; }
     for (int i = 0; i < nregions; i++) {
         Region *r = &regions[i];
         if (addr >= r->addr && addr < r->addr + r->size) {
@@ -615,12 +696,9 @@ static uint32_t block_current(int64_t timeout_ns) {
             t->wait_result = R_CANCELLED;
             break;
         }
-        if (t->cancel) {
-            t->cancel = false;
-            t->wait_kind = WAIT_NONE;
-            t->wait_result = R_CANCELLED;
-            break;
-        }
+        // (svcCancelSynchronization ends a WaitSynchronization only - as Horizon, a pending cancel stays for the
+        // next one: a mutex / condition variable wait it ended returned 0xec01 into nn::os, which aborts on it -
+        // Nine Sols' job workers, as its opening movie started)
         if (!kwait(timeout_ns, &ts)) {
             // The timeout can fire while a waker already ran: a thread it woke (or handed a mutex) did not time
             // out, and a condvar waiter that a signal moved to its mutex waits for that without a timeout, as on
@@ -863,13 +941,34 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
     // first kept its waiters waiting until it got its core back (the game's audio thread held the audio renderer's
     // mutex up to 40 ms that way).
     bool release = imm == 0x1B || imm == 0x1D;
-    if (!release) core_preempt_point(t_cur);
+    KThread *me = t_cur;
+    if (me) __atomic_add_fetch(&me->safe, 1, __ATOMIC_RELEASE);  // (in the kernel: SetThreadActivity needn't wait)
+    if (!release) core_preempt_point(me);
     svc_entry(c, imm, pc);
-    if (release) core_preempt_point(t_cur);
+    if (release) core_preempt_point(me);
+    if (me) {
+        park_if_paused(me);  // (paused while in here: not back to guest code until resumed)
+        __atomic_sub_fetch(&me->safe, 1, __ATOMIC_RELEASE);
+    }
     rt_unwind_point();
 }
 
 static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc) {
+    // SAVAGEWIND_LOG_SVC=<n> (bring-up): the first n memory / info calls with their arguments and results - what a
+    // new game's SDK asks of the kernel at boot (GetInfo, the heap, MapPhysicalMemory, QueryMemory...)
+    static _Atomic long log_svc = -1;
+    if (log_svc < 0) log_svc = ENV("SAVAGEWIND_LOG_SVC") ? atol(ENV("SAVAGEWIND_LOG_SVC")) : 0;
+    if (log_svc > 0 && (imm == 0x01 || imm == 0x02 || imm == 0x04 || imm == 0x05 || imm == 0x06 || imm == 0x29 ||
+                        imm == 0x2C || imm == 0x2D || imm == 0x13 || imm == 0x14 || imm == 0x15 || imm == 0x77 ||
+                        imm == 0x78)) {
+        log_svc--;
+        uint64_t a0 = c->x[0], a1 = c->x[1], a2 = c->x[2], a3 = c->x[3], lr = c->x[30];
+        svc_impl(c, imm, pc);
+        LOG("[svc] %02x(%llx, %llx, %llx, %llx) -> %llx %llx  lr %llx\n", imm, (unsigned long long)a0,
+            (unsigned long long)a1, (unsigned long long)a2, (unsigned long long)a3, (unsigned long long)c->x[0],
+            (unsigned long long)c->x[1], (unsigned long long)lr);
+        return;
+    }
     if (prof_svc < 0) prof_svc = ENV("SAVAGEWIND_PROF_SVC") != NULL;
     if (prof_svc && imm < 0x80) {
         uint64_t a0 = c->x[0], a1 = c->x[1], a2 = c->x[2], a3 = c->x[3], lr = c->x[30];
@@ -1105,6 +1204,8 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     }
     case 0x26:  // Break
         if (x[0] & 0x80000000u) { LOG("[kernel] Break notification %llx\n", x[0]); x[0] = R_OK; break; }
+        if (x[2] == 4 && x[1]) LOG("[kernel] svcBreak result %#x (module %u, description %u)\n", LD32(x[1]),
+                                   LD32(x[1]) & 0x1ff, (LD32(x[1]) >> 9) & 0x1fff);  // (nn::diag::Abort's Result)
         FATAL("svcBreak(reason=%llx, info=%llx, size=%llx) at %llx\n", x[0], x[1], x[2], pc);
     case 0x27: debug_string(x[0], x[1]); x[0] = R_OK; break;
     case 0x29: {  // GetInfo(_, id0, handle, id1)
@@ -1127,7 +1228,10 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 13: v = GUEST_HI - GUEST_LO; break;
         case 14: v = STACK_BASE; break;
         case 15: v = STACK_SIZE; break;
-        case 16: case 17: v = 0; break;
+        // TotalSystemResourceSize / UsedSystemResourceSize: the npdm's (the SDK's VammManager is on when the total
+        // isn't 0; it reserves address regions in the alias region and maps pages there with MapPhysicalMemory)
+        case 16: v = g_system_resource_size; break;
+        case 17: v = 0; break;
         case 18: v = g_program_id; break;  // ProgramId (main.npdm)
         // UserExceptionContextAddress: a zeroed page at the top of the TLS region. BOTW 1.8.2's
         // nn::os::SetDyingMessageRegion stores its dying-message pointer at +0x1c0 there.
@@ -1139,15 +1243,62 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[1] = v;
         break;
     }
-    case 0x2C:  // MapPhysicalMemory(addr, size)
-        memset((void *)x[0], 0, x[1]);
-        region_add(x[0], x[1], 0x7, 3);
+    case 0x2C:  // MapPhysicalMemory(addr, size): the pages not mapped yet, zeroed (phys_map)
+        x[0] = phys_map(x[0], x[1], true);
+        break;
+    case 0x2D:  // UnmapPhysicalMemory(addr, size)
+        x[0] = phys_map(x[0], x[1], false);
+        break;
+    case 0x32: {  // SetThreadActivity(handle, activity): 0 runnable, 1 paused
+        KObject *o = handle_get((uint32_t)x[0] == PSEUDO_THREAD ? kernel_current_thread_handle() : (uint32_t)x[0]);
+        if (!o || o->type != KOBJ_THREAD) { x[0] = R_INVALID_HANDLE; break; }
+        KThread *t = (KThread *)o;
+        if (x[1] == 1) {
+            __atomic_store_n(&t->paused, 1, __ATOMIC_RELEASE);
+            // (as Horizon: back once the thread is off its core - it parks at its next safe point; a thread that
+            // runs on without one for 2 s is reported and taken as paused)
+            uint64_t t0 = plat_now_ns();
+            bool warned = false;
+            // (in the kernel or parked: safe; with cores, also a thread waiting for one - it parks before it runs)
+            while (t != t_cur && !t->finished && !__atomic_load_n(&t->safe, __ATOMIC_ACQUIRE) &&
+                   (!cores_on() || __atomic_load_n(&t->core_held, __ATOMIC_ACQUIRE) >= 0) && !g_rt_unwind) {
+                if (!warned && plat_now_ns() - t0 > 2000000000ull) {
+                    LOG("[kernel] SetThreadActivity: thread %llu reached no safe point in 2 s\n", (unsigned long long)t->id);
+                    warned = true;
+                    break;
+                }
+                sched_yield();
+            }
+        } else {
+            pthread_mutex_lock(&g_pause_m);
+            __atomic_store_n(&t->paused, 0, __ATOMIC_RELEASE);
+            pthread_cond_broadcast(&g_pause_cv);
+            pthread_mutex_unlock(&g_pause_m);
+        }
         x[0] = R_OK;
         break;
-    case 0x2D:  // UnmapPhysicalMemory
-        region_remove(x[0]);
+    }
+    case 0x33: {  // GetThreadContext3(out ThreadContext *, handle): a paused thread's registers
+        KObject *o = handle_get((uint32_t)x[1]);
+        if (!o || o->type != KOBJ_THREAD) { x[0] = R_INVALID_HANDLE; break; }
+        KThread *t = (KThread *)o;
+        // nn::svc::ThreadContext: x0-x28, fp, lr, sp, pc, pstate (+pad), v0-v31, fpcr, fpsr, tpidr (0x320 bytes)
+        uint8_t *out = (uint8_t *)(uintptr_t)x[0];
+        memset(out, 0, 0x320);
+        memcpy(out, t->cpu.x, 31 * 8);  // (x0-x28, fp = x29, lr = x30)
+        memcpy(out + 0xF8, &t->cpu.sp, 8);
+        uint64_t pc = t->cpu.pc ? t->cpu.pc : t->cpu.x[30];
+        memcpy(out + 0x100, &pc, 8);
+        uint32_t pstate = (uint32_t)t->cpu.nzcv;
+        memcpy(out + 0x108, &pstate, 4);
+        memcpy(out + 0x110, t->cpu.v, 32 * 16);
+        uint32_t fpcr = (uint32_t)t->cpu.fpcr, fpsr = (uint32_t)t->cpu.fpsr;
+        memcpy(out + 0x310, &fpcr, 4);
+        memcpy(out + 0x314, &fpsr, 4);
+        memcpy(out + 0x318, &t->cpu.tpidr, 8);
         x[0] = R_OK;
         break;
+    }
     case 0x34: x[0] = svc_wait_for_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int64_t)x[3]); break;
     case 0x35: x[0] = svc_signal_to_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int32_t)x[3]); break;
     case 0x45: {  // CreateEvent -> w1 writable, w2 readable

@@ -31,6 +31,8 @@
 #include "../../services/fs_layout.h"
 
 static uint64_t stat_build_waits;  // draws that waited for their pipeline (draw_must_happen)
+// (bring-up) the first skips at each place a draw is dropped, by source line
+#define SKIP_NOTE() ({ static int n_; if (n_++ < 3) LOG("[vk] draw skipped at exec.c:%d\n", __LINE__); })
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t stat_gw_waits, stat_gw_holds;  // draws / dispatches that waited for a storing shader; lists held (gw_check)
 static uint64_t stat_uub, stat_uub_same, stat_gcopy_hit, stat_gcopy_miss, stat_gcopy_bytes;
@@ -922,6 +924,7 @@ static struct {
     int nstream;
     Range vbuf[16], ubuf[6][18], sbuf[6][16];
     uint64_t tex[6][32], img[6][8];
+    uint64_t smp[6][32];  // separate samplers (CMD_BIND_SAMPLERS), << 20
     NvnDescPool *tpool, *spool;
     float viewport[16][4];
     int32_t scissor[16][4];
@@ -5710,6 +5713,8 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     ShaderTexture *st_ = &si->tex[i];
     int slot = ((int)st_->handle_offset - 0x20) / 8;  // 64-bit handles from offset 0x20
     uint64_t h = (slot >= 0 && slot < 32) ? st.tex[stage][slot] : 0;
+    if (h && st_->sampler_slot >= 0 && st_->sampler_slot < 32)  // (separate texture + separate sampler)
+        h = (h & 0xFFFFF) | st.smp[stage][st_->sampler_slot];
     VkImageView view = VK_NULL_HANDLE;
     VkSampler smp = VK_NULL_HANDLE;
     VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL;
@@ -6057,6 +6062,33 @@ static VkDescriptorBufferInfo gsnap_info(int stage) {
 // pre_ii: texture descriptors already resolved by the caller (draw: fragment textures, needed earlier for the
 // viewport decision), or NULL.
 // dyn / ndyn: the offsets of its dynamic uniform buffers, by binding (ubo_dynamic_mark), appended.
+// The view of storage image i (ShaderInfo.img: SUST): bound image slot k holds a texture pool index (NVN's image
+// handles, objects.c nvnDeviceGetImageHandle). The image needs storage usage (textures.c: NVN's IMAGE flag); without
+// it, or with no texture there, a dummy (the stores go nowhere).
+static VkDescriptorImageInfo storage_image_info(int stage, ShaderInfo *si, int i) {
+    int slot = si->img[i].slot, type = si->img[i].type;
+    uint64_t h = slot < 8 ? st.img[stage][slot] : 0;
+    uint32_t tic = h & 0xFFFFF;
+    NvnTexture *t = h && st.tpool && tic < (uint32_t)st.tpool->count ? ((NvnTexEntry *)st.tpool->entries)[tic].tex : NULL;
+    VkImageView view = VK_NULL_HANDLE;
+    if (t) {
+        TexBackend *b = vk_tex(t, true);  // (the GPU writes it: never uploaded from guest memory again)
+        VkImageViewType vt = type == TEXTYPE_3D ? VK_IMAGE_VIEW_TYPE_3D : type == TEXTYPE_1D ? VK_IMAGE_VIEW_TYPE_1D
+                           : type == TEXTYPE_1D_ARRAY ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : type == TEXTYPE_2D_ARRAY ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                           : VK_IMAGE_VIEW_TYPE_2D;
+        static const VkComponentMapping id = {0};
+        if (b->image && b->storage && !(b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT))
+            view = vk_image_view(b, vt, b->format, 0, 1, 0, vt == VK_IMAGE_VIEW_TYPE_2D_ARRAY || vt == VK_IMAGE_VIEW_TYPE_1D_ARRAY ? b->layers : 1, id,
+                                 VK_IMAGE_ASPECT_COLOR_BIT);
+    }
+    static int nlog;
+    if (!view && nlog++ < 8)
+        LOG("[compute] image slot %d (handle %llx, texture %p%s): not a storage image, stores dropped\n", slot, (unsigned long long)h,
+            (void *)t, t && t->backend && !((TexBackend *)t->backend)->storage ? ", no storage usage" : "");
+    if (!view) view = vk_dummy_storage_view(type);
+    return (VkDescriptorImageInfo){VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
+}
+
 static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t set, int stage, ShaderInfo *si, const float *rscale_row0,
                                  const float tint[8], uint32_t gx, uint32_t gy, uint32_t gz, const VkDescriptorImageInfo *pre_ii,
                                  uint32_t *dyn, int *ndyn) {
@@ -6084,6 +6116,9 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
                 tex_sc[sg][ti][0] = sc[0]; tex_sc[sg][ti][1] = sc[1];
                 tex_wh[sg][ti][0] = wh[0]; tex_wh[sg][ti][1] = wh[1];
             }
+            w[n].pImageInfo = &ii[n];
+        } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && b->binding >= IMG_BINDING && b->binding < IMG_BINDING + 8) {
+            ii[n] = storage_image_info(stage, si, (int)b->binding - IMG_BINDING);
             w[n].pImageInfo = &ii[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->binding < 17) {
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
@@ -6274,7 +6309,10 @@ static CsProg *compute_program(NvnProgram *np) {
         if (!cp->local[i]) cp->local[i] = 1;
     }
     save_glsl(cp->si->msl, ss->code_addr, "cs");
-    run_job(build_compute, cp);
+    // (image stores: built now - Unity bakes its colour-grading LUT with one, sometimes once, and a dispatch skipped
+    // while the pipeline builds left the LUT, and the whole picture graded through it, black)
+    if (cp->si->nimg) build_compute(cp);
+    else run_job(build_compute, cp);
     return cp;
 }
 
@@ -6689,7 +6727,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     snap_reason = "compute"; snapshots_invalidate(NULL);
     if (!st.program || !gx || !gy || !gz) return;
     CsProg *cp = compute_program(st.program);
-    if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
+    if (!cp || atomic_load(&cp->p.state) != 1) { SKIP_NOTE(), stat_skipped++; return; }
     gw_check((const uint32_t[6]){0, 0, 0, 0, 0, cp->si->cbuf_mask}, false, 0, 0);
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
@@ -6709,6 +6747,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
     rec_CmdDispatch(cb, gx, gy, gz);
+    if (cp->si->nimg) vk_full_barrier(cb);  // (the images it stored into: sampled by the draws next)
     stat_dispatches++;
     chunk_draws++;
     if (cp->si->writes_gmem) {
@@ -6906,7 +6945,7 @@ static void wait_built(_Atomic int *state) {  // (0 building: until built or fai
 static void draw_(CmdRec *r, bool indexed) {
     if (profd) prof_tp_ = SDL_GetTicksNS();
     fg_before_draw();
-    if (!st.program) { stat_skipped++; return; }
+    if (!st.program) { SKIP_NOTE(), stat_skipped++; return; }
     static int no_key_gen = -1;
     if (no_key_gen < 0) no_key_gen = getenv("SAVAGEWIND_VK_NO_KEY_GEN") != NULL;
     static struct { uint64_t gen; uint32_t origin, dmode; NvnProgram *np; Prog *pr; bool points; } pm;
@@ -6932,7 +6971,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (!pr || atomic_load(&pr->state) != 1) {
         if (st.rt.ncolor && vk_trace_tex(st.rt.color[0]))
             vk_trace_event(st.rt.color[0], 2, NULL, 0, "draw skipped: program %s", pr ? "not compiled yet" : "missing");
-        stat_skipped++;
+        SKIP_NOTE(), stat_skipped++;
         return;
     }
     {   // fragment-shader hash: skip lists (SAVAGEWIND_SKIP_FSHASH), debug logs, GPU profile labels
@@ -6957,7 +6996,7 @@ static void draw_(CmdRec *r, bool indexed) {
             for (int i = 0; i < nskip; i++) last_skip |= fs_sel_match(&skip[i], fs, last_hash);
         }
         extern volatile int g_skip_fs_off;
-        if (last_skip && !g_skip_fs_off) { stat_skipped++; return; }
+        if (last_skip && !g_skip_fs_off) { SKIP_NOTE(), stat_skipped++; return; }
         {   // (debugging) SAVAGEWIND_SKIP_VSHASH=<hash>[,<hash>]: draws of those vertex shaders skipped (save_glsl's names)
             static const char *vsl = (const char *)1;
             if (vsl == (const char *)1) vsl = getenv("SAVAGEWIND_SKIP_VSHASH");
@@ -6965,7 +7004,7 @@ static void draw_(CmdRec *r, bool indexed) {
             if (vsl && vs) {
                 char hx_[20];
                 snprintf(hx_, sizeof hx_, "%016llx", (unsigned long long)hmix(1469598103934665603ull, (const void *)(uintptr_t)(vs + 0x30), 0x200));
-                if (strstr(vsl, hx_)) { stat_skipped++; return; }
+                if (strstr(vsl, hx_)) { SKIP_NOTE(), stat_skipped++; return; }
             }
         }
         if (g_debug_frame && getenv("SAVAGEWIND_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
@@ -7086,7 +7125,7 @@ static void draw_(CmdRec *r, bool indexed) {
         gw_check(cbufs, true, indexed ? r->x[3] : 0, indexed ? (uint64_t)r->x[2] * 4 : 0);
     }
     begin_pass();
-    if (pass_void) { stat_skipped++; return; }
+    if (pass_void) { SKIP_NOTE(), stat_skipped++; return; }
     // ---- motion vectors (mvec.c): an opaque draw of a pass with the motion target is recorded (its identity and the
     // vertex shader's inputs, for the next frame); matched with one of the previous frame, it is drawn with its motion
     // program: the vertex shader also run on the previous frame's inputs, the fragment shader also writing the distance
@@ -7179,7 +7218,7 @@ static void draw_(CmdRec *r, bool indexed) {
     VkPrimitiveTopology topo;
     uint8_t cls;
     bool native = topology(mode, &topo, &cls);
-    if (!native && mode != 6 && mode != 7 && mode != 9) { stat_skipped++; return; }
+    if (!native && mode != 6 && mode != 7 && mode != 9) { SKIP_NOTE(), stat_skipped++; return; }
 
     uint64_t prof_tk_ = profd ? SDL_GetTicksNS() : 0;
     if (profd) prof_pre += prof_tk_ - prof_tp_;
@@ -7277,7 +7316,7 @@ have_pipe:;
     if (!bind_later && atomic_load(&pp->state) != 1) {
         if (st.rt.ncolor && vk_trace_tex(st.rt.color[0]))
             vk_trace_event(st.rt.color[0], 3, NULL, 0, "draw skipped: pipeline %s", pp->state ? "failed" : "compiling");
-        stat_skipped++;
+        SKIP_NOTE(), stat_skipped++;
         return;
     }
     if (no_dyn_cache) vk_dyn_forget();
@@ -9636,8 +9675,11 @@ static void exec_list(uint64_t handle, int depth) {
                 memcpy(&st.sbuf[r->x[0]][r->x[1] + i], (uint8_t *)x + i * 16, 16);
             break;
         case CMD_BIND_TEXTURES:
-            for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 32 && r->x[0] < 6; i++)
+            for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 32 && r->x[0] < 6; i++) {
                 memcpy(&st.tex[r->x[0]][r->x[1] + i], (uint8_t *)x + i * 8, 8);
+                uint64_t *h = &st.tex[r->x[0]][r->x[1] + i];
+                if (*h && !(*h >> 20)) *h |= st.smp[r->x[0]][r->x[1] + i];  // (a separate texture: its sampler)
+            }
             if (g_debug_frame && getenv("SAVAGEWIND_LOG_BINDS")) {
                 LOG("[bind] stage %llu slots %llu+%llu:", (unsigned long long)r->x[0], (unsigned long long)r->x[1],
                     (unsigned long long)r->x[2]);
@@ -9656,6 +9698,15 @@ static void exec_list(uint64_t handle, int depth) {
             if (r->x[3] >= GUEST_LO && r->x[3] + r->x[2] * 8 <= GUEST_HI)
                 for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 32 && r->x[0] < 6; i++)
                     memcpy(&st.tex[r->x[0]][r->x[1] + i], (const uint8_t *)(uintptr_t)r->x[3] + i * 8, 8);
+            break;
+        case CMD_BIND_SAMPLERS:
+            for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 32 && r->x[0] < 6; i++) {
+                uint64_t smp;
+                memcpy(&smp, (uint8_t *)x + i * 8, 8);
+                st.smp[r->x[0]][r->x[1] + i] = smp & ~0xFFFFFull;
+                uint64_t *h = &st.tex[r->x[0]][r->x[1] + i];
+                if (*h) *h = (*h & 0xFFFFF) | (smp & ~0xFFFFFull);
+            }
             break;
         case CMD_BIND_IMAGES:
             for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 8 && r->x[0] < 6; i++)

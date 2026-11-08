@@ -388,8 +388,18 @@ class Lifter:
                                            bits(w, 16, 5), bits(w, 15, 1), bits(w, 5, 5), bits(w, 0, 5))
         nbits = 8 << size
         addr = XS(rn)
-        if o1:
-            raise Unsupported('exclusive pair / CAS')
+        if o1 and o2:
+            raise Unsupported('CAS')
+        if o1:  # exclusive pair: LDXP / LDAXP, STXP / STLXP (size 2: W pair, 3: X pair; runtime/cpu.h)
+            if size < 2:
+                raise Unsupported('exclusive pair size')
+            rt2 = bits(w, 10, 5)
+            n = 64 if size == 3 else 32
+            if L:
+                return Insn('op', f'{{ uint64_t a_, b_; ldxp{n}(c, {addr}, &a_, &b_); '
+                                  f'{set_reg(1, rt, "a_")} {set_reg(1, rt2, "b_")} }}')
+            src = X if n == 64 else W
+            return Insn('op', f'{{ uint32_t st = stxp{n}(c, {addr}, {src(rt)}, {src(rt2)}); {set_reg(0, rs, "st")} }}')
         if o2 == 0:
             if L:
                 return Insn('op', set_reg(1, rt, f'ldx{nbits}(c, {addr})'))

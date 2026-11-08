@@ -430,7 +430,7 @@ NVN(nvnCommandBufferBindProgram) {
     log_bind_fs(c, c->x[1] ? HOST(NvnProgram, c->x[1]) : NULL);
     Snap s = snap(c);
     CmdRec *r = record(c, CMD_BIND_PROGRAM, 0, &s);
-    r->x[0] = (uint64_t)(uintptr_t)HOST(NvnProgram, s.x[1]);  // host program
+    r->x[0] = s.x[1] ? (uint64_t)(uintptr_t)HOST(NvnProgram, s.x[1]) : 0;  // host program (none: Unity unbinds)
 }
 NVN(nvnCommandBufferBindBlendState) { record_copy(c, CMD_BIND_BLEND, 1, 8); }
 NVN(nvnCommandBufferBindChannelMaskState) { record_copy(c, CMD_BIND_CHANNEL_MASK, 1, 4); }
@@ -494,8 +494,15 @@ NVN(nvnCommandBufferBindSeparateTexture) {
     r->x[0] = s.x[1]; r->x[1] = s.x[2]; r->x[2] = 1;
     memcpy(r->extra, &s.x[3], 8);
 }
-NVN(nvnCommandBufferBindSeparateSamplers) { (void)c; UNIMPLEMENTED_ONCE("BindSeparateSamplers"); }
-NVN(nvnCommandBufferBindSeparateSampler) { (void)c; UNIMPLEMENTED_ONCE("BindSeparateSampler"); }
+// (stage, first, count, sampler handles: sampler << 20): merged with the separate texture at the same slot
+// (runtime/nvn/vulkan/exec.c CMD_BIND_SAMPLERS: Unity binds a texture and its sampler at one index)
+NVN(nvnCommandBufferBindSeparateSamplers) { record_copy(c, CMD_BIND_SAMPLERS, 4, (uint32_t)A(3) * 8); }
+NVN(nvnCommandBufferBindSeparateSampler) {
+    Snap s = snap(c);
+    CmdRec *r = record(c, CMD_BIND_SAMPLERS, 8, &s);
+    r->x[0] = s.x[1]; r->x[1] = s.x[2]; r->x[2] = 1;
+    memcpy(r->extra, &s.x[3], 8);
+}
 NVN(nvnCommandBufferBindTransformFeedbackBuffers) { (void)c; UNIMPLEMENTED_ONCE("BindTransformFeedbackBuffers"); }
 NVN(nvnCommandBufferBindTransformFeedbackBuffer) { (void)c; UNIMPLEMENTED_ONCE("BindTransformFeedbackBuffer"); }
 NVN(nvnCommandBufferBindCoverageModulationTable) { (void)c; }

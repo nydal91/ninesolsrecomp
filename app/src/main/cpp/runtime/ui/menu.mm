@@ -959,7 +959,7 @@ static void tab_display(void) {
         static std::string desc;
         desc = std::string("The Vulkan driver the game draws with: System is the phone's own. Others (Mesa Turnip, "
                            "other Adreno drivers) are installed by putting their .zip in Android/data/"
-                           "io.github.mvdkrecomp/files/drivers and starting the app again. Takes effect at the "
+                           "io.github.ninesolsrecomp/files/drivers and starting the app again. Takes effect at the "
                            "next start. In use now: ") + vk_driver_name() + ".";
         if (opt_choice("GPU driver", &cur, names.data(), (int)names.size(), 0, desc.c_str(), false)) {
             snprintf(g_settings.gpu_driver, sizeof g_settings.gpu_driver, "%s", dirs[cur].c_str());

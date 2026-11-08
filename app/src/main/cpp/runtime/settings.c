@@ -29,6 +29,7 @@ Settings g_settings = {
     .mouse_camera = true,
 #ifdef __ANDROID__
     .gpu_turbo = true,
+    .touch_controls = true,  // (a phone: the on-screen controller until a controller is used)
 #endif
     .pc_cursor = true,
     .mouse_sens = MOUSE_SENS_DEFAULT,
@@ -40,7 +41,7 @@ Settings g_settings = {
     .fps_limit = FPS_DEFAULT,
     .precompile_shaders = true,
     .vsync = VSYNC_DEFAULT,
-    .wide_view = true,  // (MvDK: wide and ultrawide screens see more of each level; the HUD stays 16:9 in the middle)
+    .wide_view = true,  // (Nine Sols: Unity draws its screen at the window's shape itself - runtime/hle/unity_wide.c)
     .fov = 100,
     .color_lut_strength = 100,
 };

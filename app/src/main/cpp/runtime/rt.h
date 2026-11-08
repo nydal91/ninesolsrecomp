@@ -27,9 +27,11 @@ static inline void rt_log(const char *fmt, ...) {
 
 // ---- address space layout (guest addresses == host addresses)
 // macOS reserves 0x2_0000_0000-0x70_0000_0000, and guest addresses must fit in 39 bits, so the
-// guest lives in a 12.5 GB window at 0x70_0000_0000 claimed at startup (see main.c).
+// guest lives in a window at 0x70_0000_0000 claimed at startup (see main.c). Nine Sols: 32 GB, for a bigger alias
+// region (below). Not up to the 39-bit limit: Android maps the app's own libraries from about 0x7a_8000_0000 up
+// (an Android 15 phone; it moves a little from boot to boot), and a window over them can't be reserved.
 #define GUEST_LO     0x7000000000ull
-#define GUEST_HI     0x7320000000ull
+#define GUEST_HI     0x7800000000ull
 // The exefs modules (main, subsdk0..9, sdk) sit back to back from MAIN_BASE, main first, as tools/layout.py
 // places them; the game code library says where each one is (runtime/gamelib.h). Both bounds: tools/layout.py too.
 #define MAIN_BASE    0x7000000000ull
@@ -40,8 +42,11 @@ static inline void rt_log(const char *fmt, ...) {
 #define TLS_SIZE     0x0000100000ull
 #define HLE_HEAP     0x7092000000ull   // guest-visible memory owned by host code
 #define HLE_HEAP_SIZE 0x000E000000ull
-#define ALIAS_BASE   0x7100000000ull   // alias region (svcMapMemory targets)
-#define ALIAS_SIZE   0x0100000000ull
+// Alias region (svcMapMemory targets; the SDK's virtual address memory reserves its regions here and maps them with
+// MapPhysicalMemory). Nine Sols: Unity's startup reserves all the free memory (~3.2 GB) as one region, which the SDK
+// aligns to 1 GB: 4 GB, the old size, can't hold it next to the SDK's own page. 16 GB, to the window's end.
+#define ALIAS_BASE   0x7400000000ull
+#define ALIAS_SIZE   0x0400000000ull
 #define HEAP_BASE    0x7240000000ull
 #define HEAP_MAX     0x00D0000000ull   // 3.25 GB
 
@@ -104,6 +109,7 @@ void guest_call(Cpu *c, uint64_t addr);   // call guest function at addr (saves/
 uint64_t guest_sym(const char *name);     // cached loader_find_symbol, fatal if missing
 void *hle_alloc(uint64_t size);           // zeroed guest-visible memory (never freed)
 extern const char *g_romfs_dir;
+extern uint64_t g_system_resource_size;  // main.npdm SystemResourceSize (runtime/main.c): GetInfo 16
 extern uint64_t g_program_id;     // from main.npdm's ACI0 (runtime/main.c); 0 before boot
 uint64_t fs_aoc_base_id(void);    // add-on content: the base id, and whether index's image is set up (services/fs.c)
 bool fs_aoc_present(int index);

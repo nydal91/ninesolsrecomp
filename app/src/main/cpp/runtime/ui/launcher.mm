@@ -194,7 +194,7 @@ static unsigned count_files(const std::string &dir, unsigned enough, unsigned n 
 // The cutscene videos: all 30 in Movie/. A RomFS without that folder (left out when it was extracted, or lost copying
 // it) passed the file count, 30 short of ~41,000, and the game crashed at the first pre-rendered cutscene, the Great
 // Plateau Tower's (#292): such files are incomplete, before the setup copies them and before a start plays them.
-static const unsigned MOVIE_FILES = 9;  // (MvDK: Movie/ has 9 videos)
+static const unsigned MOVIE_FILES = 0;  // (Nine Sols: no Movie/ folder; Unity keeps its videos in the asset bundles)
 static bool movies_complete(const std::string &romfs) { return count_files(romfs + "/Movie", MOVIE_FILES) >= MOVIE_FILES; }
 
 // The RomFS of version v, update applied? "" = yes, else what was found, said to the player (in the menu language).
@@ -211,8 +211,9 @@ static std::string check_romfs(const std::string &romfs, const GameVersion &v) {
         while (a < b && isspace((unsigned char)*a)) a++;
         while (b > a && isspace((unsigned char)b[-1])) *--b = 0;
         memmove(found, a, strlen(a) + 1);
-    } else if (file_exists(romfs + "/System/RegionLangMask.txt") && is_dir(romfs + "/Sequence")) {
-        snprintf(found, sizeof found, "%s", v.name);  // (MvDK: its RomFS has no Version.txt; these are its own)
+    } else if (file_exists(romfs + "/Data/globalgamemanagers") &&
+               file_exists(romfs + "/Data/Managed/Metadata/global-metadata.dat")) {
+        snprintf(found, sizeof found, "%s", v.name);  // (Nine Sols: a Unity IL2CPP RomFS has no Version.txt)
     }
     unsigned want = (unsigned)(v.romfs_files * ROMFS_FILES_MARGIN);
     unsigned files = strcmp(found, v.name) || !want ? 0 : count_files(romfs, want);  // (only for the right version)
@@ -1074,7 +1075,7 @@ extern "C" void launcher_run(const char *root, int mode) {
     ui_window_init();
     SDL_Window *win = ui_window();
     g_launcher_win = win;
-    SDL_SetWindowTitle(win, g_setup_only ? "MvDK Recomp" : "MvDK Recomp Configuration");
+    SDL_SetWindowTitle(win, g_setup_only ? "Nine Sols Recomp" : "Nine Sols Recomp Configuration");
 #ifdef __APPLE__
     CAMetalLayer *layer = (__bridge CAMetalLayer *)ui_metal_layer();
     id<MTLDevice> dev = (__bridge id<MTLDevice>)ui_metal_device();
@@ -1258,7 +1259,7 @@ extern "C" void launcher_run(const char *root, int mode) {
             ImGui::SetCursorPos(ImVec2(x0, 120 * s));
             ImGui::PushFont(g_font_title);
             if (page == MAIN) {  // gold to orange, shadowed (not behind the Settings / Game Files windows)
-                const char *t = "MvDK Recomp";
+                const char *t = "Nine Sols Recomp";
                 ImVec2 p = ImGui::GetCursorScreenPos();
                 text_fx(ImGui::GetWindowDrawList(), ImGui::GetFont(), ImGui::GetFontSize(), p, IM_COL32(255, 232, 120, 255),
                         IM_COL32(255, 138, 48, 255), t, 3 * s);

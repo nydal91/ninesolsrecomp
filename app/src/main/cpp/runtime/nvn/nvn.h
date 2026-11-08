@@ -29,6 +29,7 @@ typedef struct NvnTexture {
     uint64_t addr;  // guest address of texel storage
     NvnPool *pool;
     uint64_t pool_offset;
+    uint64_t pool_obj;  // the game's NVNmemoryPool * (nvnTextureGetMemoryPool: Unity maps it to write texels)
     void *backend;  // renderer-side texture
     int backend_slot;  // (Vulkan backend) slot in textures.c's list of textures holding an image, + 1
     uint64_t debug_id;
@@ -144,7 +145,7 @@ enum {
     CMD_COPY_TEXTURE_TO_TEXTURE, CMD_DOWNSAMPLE, CMD_UPDATE_UNIFORM_BUFFER, CMD_FENCE_SYNC, CMD_WAIT_SYNC,
     CMD_BARRIER, CMD_SIGNAL_EVENT, CMD_WAIT_EVENT, CMD_REPORT_COUNTER, CMD_DISCARD_COLOR,
     CMD_DISCARD_DEPTH_STENCIL, CMD_SET_COPY_STRIDES, CMD_DRAW_TEXTURE, CMD_RESOLVE_DEPTH, CMD_BIND_TEXTURES_DEFERRED,
-    CMD_SET_DEPTH_CLAMP, CMD_RESET_COUNTER, CMD_SET_RASTERIZER_DISCARD,
+    CMD_SET_DEPTH_CLAMP, CMD_RESET_COUNTER, CMD_SET_RASTERIZER_DISCARD, CMD_BIND_SAMPLERS,
     CMD_COUNT
 };
 

@@ -42,6 +42,11 @@ struct KThread {
     int core_held;
     uint64_t core_ticket;
     bool off_cores;  // runs beside the cores, never holding one (kernel_thread_off_cores)
+    // svcSetThreadActivity: paused by another thread (nn::os::SuspendThread: IL2CPP's garbage collector stops the
+    // world with it). A paused thread doesn't get a core: it parks in core_acquire, and one holding a core gives it up
+    // at its next safe point (a syscall, an indirect call). Its guest registers are then all in cpu.
+    volatile int paused;
+    volatile int safe;  // > 0: not running guest code (in a syscall, parked) - what SetThreadActivity waits for
 };
 
 typedef struct KSharedMem {

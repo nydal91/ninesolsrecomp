@@ -417,7 +417,15 @@ NVN(nvnMemoryPoolGetBufferAddress) { RET(HOST(NvnPool, A(0))->storage); }  // GP
 NVN(nvnMemoryPoolGetSize) { RET(HOST(NvnPool, A(0))->size); }
 NVN(nvnMemoryPoolGetFlags) { RET(HOST(NvnPool, A(0))->flags); }
 NVN(nvnMemoryPoolFlushMappedRange) {
-    NvnPool *p = HOST(NvnPool, A(0));
+    // (Nine Sols: Unity flushes through a null pool on one of its upload paths at boot - the driver's own check:
+    // nothing to flush. Logged once with the caller.)
+    NvnPool *p = A(0) ? HOST(NvnPool, A(0)) : NULL;
+    if (!p) {
+        static int once;
+        if (!once++) LOG("[nvn] nvnMemoryPoolFlushMappedRange on pool %llx (not initialized) from lr %llx\n",
+                         (unsigned long long)A(0), (unsigned long long)c->x[30]);
+        return;
+    }
     backend_pool_written(p->storage + A(1), A(2));
 }
 NVN(nvnMemoryPoolInvalidateMappedRange) { (void)c; }
@@ -460,6 +468,9 @@ NVN(nvnBufferBuilderGetMemoryOffset) { RET(G(uint64_t, A(0), 0x10)); }
 NVN(nvnBufferBuilderGetSize) { RET(G(uint64_t, A(0), 0x18)); }
 NVN(nvnBufferInitialize) {
     uint64_t pool = G(uint64_t, A(1), 8), off = G(uint64_t, A(1), 0x10);
+    if (ENV("SAVAGEWIND_LOG_NVN_BUFFERS"))  // (bring-up) every buffer: object, pool, offset, size, caller
+        LOG("[nvn] buffer %llx pool %llx +%llx size %llx lr %llx\n", (unsigned long long)A(0), (unsigned long long)pool,
+            (unsigned long long)off, (unsigned long long)G(uint64_t, A(1), 0x18), (unsigned long long)c->x[30]);
     G(uint64_t, A(0), 0) = HOST(NvnPool, pool)->storage + off;
     G(uint64_t, A(0), 8) = pool;
     G(uint64_t, A(0), 0x10) = off;
@@ -471,7 +482,19 @@ NVN(nvnBufferFinalize) { (void)c; }
 NVN(nvnBufferSetDebugLabel) { (void)c; }
 NVN(nvnBufferMap) { RET(G(uint64_t, A(0), 0)); }
 NVN(nvnBufferGetAddress) { RET(G(uint64_t, A(0), 0)); }
-NVN(nvnBufferGetMemoryPool) { RET(G(uint64_t, A(0), 8)); }
+NVN(nvnBufferGetMemoryPool) {
+    uint64_t pool = G(uint64_t, A(0), 8);
+    if (!pool) {  // (bring-up: a buffer nvnBufferInitialize never saw - what is in it)
+        static int n;
+        if (n++ < 4) {
+            const uint64_t *q = (const uint64_t *)AP(0);
+            LOG("[nvn] buffer %llx without a pool (lr %llx): %llx %llx %llx %llx %llx %llx\n", (unsigned long long)A(0),
+                (unsigned long long)c->x[30], (unsigned long long)q[0], (unsigned long long)q[1],
+                (unsigned long long)q[2], (unsigned long long)q[3], (unsigned long long)q[4], (unsigned long long)q[5]);
+        }
+    }
+    RET(pool);
+}
 NVN(nvnBufferGetMemoryOffset) { RET(G(uint64_t, A(0), 0x10)); }
 NVN(nvnBufferGetSize) { RET(G(uint64_t, A(0), 0x18)); }
 NVN(nvnBufferGetDebugID) { RET(G(uint64_t, A(0), 0x20)); }
@@ -593,6 +616,7 @@ static NvnTexture *texture_from_builder(uint64_t b) {
     t->stride = G(uint64_t, b, 0x30);
     uint64_t pool = G(uint64_t, b, 0x38);
     t->pool = pool ? HOST(NvnPool, pool) : NULL;
+    t->pool_obj = pool;
     t->pool_offset = G(uint64_t, b, 0x40);
     t->addr = t->pool ? t->pool->storage + t->pool_offset : 0;
     builder_layout(b, &t->layout);
@@ -714,6 +738,20 @@ RT_ON_RESET(tex_set_reset) {  // (after the renderer's reset: no image is left)
 
 NVN(nvnTextureInitialize) {
     NvnTexture *t = texture_from_builder(A(1));
+    if (t->width >= 1024 && t->height >= 512 && getenv("SAVAGEWIND_LOG_BIG_TEX"))  // (bring-up: render target sizes)
+    {
+        LOG("[nvn] texture %ux%u fmt %#x flags %#x target %u (lr %llx)\n", t->width, t->height, t->format, t->flags,
+            t->target, (unsigned long long)c->x[30]);
+        if (t->width == 1920 && t->height == 1080) {  // (the guest's frame chain: who asks for a 16:9 target)
+            uint64_t fp = c->x[29];
+            char line[512]; int n = 0;
+            for (int i = 0; i < 14 && fp && fp % 8 == 0 && fp > 0x1000000; i++) {
+                n += snprintf(line + n, sizeof line - n, " %llx", (unsigned long long)LD64(fp + 8));
+                fp = LD64(fp);
+            }
+            LOG("[nvn]   frames:%s\n", line);
+        }
+    }
     if (t->flags & 2)
         LOG("[nvn] video texture %p: %ux%u fmt %#x flags %#x target %u addr %llx stride %llu\n", t, t->width, t->height,
             t->format, t->flags, t->target, t->addr, t->stride);
@@ -784,7 +822,7 @@ NVN(nvnTextureGetSwizzle) { for (int i = 0; i < 4; i++) *(uint32_t *)AP(1 + i) =
 NVN(nvnTextureGetDepthStencilMode) { RET(TEX->ds_mode); }
 NVN(nvnTextureGetStride) { RET(TEX->stride); }
 NVN(nvnTextureGetTextureAddress) { RET(TEX->addr); }
-NVN(nvnTextureGetMemoryPool) { RET(0); }
+NVN(nvnTextureGetMemoryPool) { RET(TEX->pool_obj); }
 NVN(nvnTextureGetMemoryOffset) { RET(TEX->pool_offset); }
 NVN(nvnTextureGetStorageSize) {
     NvnTexture *t = TEX;
@@ -1125,7 +1163,10 @@ NVN(nvnWindowInitialize) {
     w->interval = (int)G(uint32_t, A(1), 0x20);
     w->active = G(uint32_t, A(1), 0x24) ? (int)G(uint32_t, A(1), 0x24) : w->num;
     SET_HOST(A(0), w);
-    LOG("[nvn] window with %d textures\n", w->num);
+    {
+        NvnTexture *t0 = w->num && w->textures[0] ? HOST(NvnTexture, w->textures[0]) : NULL;
+        LOG("[nvn] window with %d textures (%ux%u)\n", w->num, t0 ? t0->width : 0, t0 ? t0->height : 0);
+    }
     RET(1);
 }
 NVN(nvnWindowFinalize) { (void)c; }

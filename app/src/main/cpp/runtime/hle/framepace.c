@@ -126,6 +126,7 @@ static bool event_at_30(void) {
 
 // The game's UI screen `id` exists (the screen manager's array; ids as runtime/ui/game_options.mm uses them)
 static bool screen_up(uint32_t id) {
+    if (!g_site.screen_mgr) return false;  // (a game without BOTW's sites: Nine Sols)
     uint64_t mgr = *(uint64_t *)(uintptr_t)g_site.screen_mgr;
     if (!mgr || VF(uint32_t, mgr, 0x28) <= id) return false;
     uint64_t arr = VF(uint64_t, mgr, 0x30);
@@ -134,7 +135,7 @@ static bool screen_up(uint32_t id) {
 
 // (screens: 1 the start screen, 0x38 its load and confirmation menus; 0x38 can also be used over a paused game)
 bool framepace_title_ui(void) {
-    if (*(uint32_t *)(uintptr_t)PAUSE_STATE) return false;
+    if (!PAUSE_STATE || *(uint32_t *)(uintptr_t)PAUSE_STATE) return false;
     return screen_up(1) || screen_up(0x38);
 }
 
@@ -149,7 +150,9 @@ int framepace_target(void) {
     static int forced = -2, movie = -2, menu = -2, event = -2;
     if (forced == -2) forced = env_int("SAVAGEWIND_FPS", -1);
     extern bool movie_paced(void);
-    if (movie == -2) movie = env_int("SAVAGEWIND_MOVIE_FPS", movie_paced() ? 0 : -1);  // (-1: the movie's own frame rate)
+    // (-1: the movie's own frame rate. Nine Sols: 0 - Unity times its movies itself, at the game's frame rate)
+    if (movie == -2) movie = env_int("SAVAGEWIND_MOVIE_FPS", 0);
+    (void)movie_paced;
     if (menu == -2) menu = env_int("SAVAGEWIND_MENU_FPS", 0);
     if (event == -2) event = env_int("SAVAGEWIND_EVENT_FPS", 0);
     int fps = forced >= 0 ? forced : g_settings.fps_limit;
