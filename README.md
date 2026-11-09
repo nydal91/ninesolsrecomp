@@ -26,7 +26,7 @@ view widened to the phone's screen.
 | Audio | Wwise (Vorbis / PTADPCM, decoded in software) through `audout`; `hwopus` is only probed |
 | Version check / RomFS check | Nine Sols main build id `0240741fc426c6c4`; Unity RomFS recognised by `Data/globalgamemanagers` + `global-metadata.dat` |
 | Runtime, renderer, audio | Inherited from MvDK Recomp; Unity-specific gaps are found by booting |
-| Touch | On-screen controller on by default on Android (stick, A B X Y, d-pad, L R ZL ZR, - +); it hides while a controller is used. Double tap on free screen opens the settings |
+| Touch | On-screen controller on by default on Android (stick, A B X Y, d-pad, L R ZL ZR, - +); it hides while a controller is used. Six fingers on the screen at once open the settings |
 | Test helpers | `scripts/newgame.sh` (boot, Start Game, slot 1), `scripts/ctl.sh` (control socket on 7777: `press a 6`, `stick l 1 0 60`, `shot <name>`) |
 
 ## Building

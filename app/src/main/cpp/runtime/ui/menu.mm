@@ -227,19 +227,17 @@ bool menu_handle_event(const SDL_Event *e) {
         push(q);
         return false;  // the input runtime also releases its cached controls
     }
-    // a double tap on free screen opens the settings (runtime/touch.c touch_double_tap; with the menu open the taps are
-    // ImGui's, and the menu closes from its own controls)
-    static uint64_t dtap_quiet_until;  // (the opening tap's own mouse events, which SDL makes from the touch: not a
-                                       // click in the menu - it landed on a text field and brought up the keyboard)
-    if (touch_double_tap(e) && !g_open.load() && g_kbd.load() != 1 && !console_is_open()) {
+    // six fingers on the screen at once open the settings (runtime/touch.c touch_settings_gesture); the gesture's
+    // fingers, and the mouse events SDL makes from them, are nobody's until they are all lifted (not a click in the menu)
+    if (touch_settings_gesture(e) && !g_open.load() && g_kbd.load() != 1 && !console_is_open()) {
         set_open(true);
-        dtap_quiet_until = SDL_GetTicks() + 400;
+        touch_reset();
         return true;
     }
-    if (SDL_GetTicks() < dtap_quiet_until &&
+    if (touch_gesture_held() &&
         (((e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_MOUSE_BUTTON_UP) && e->button.which == SDL_TOUCH_MOUSEID) ||
-         (e->type == SDL_EVENT_MOUSE_MOTION && e->motion.which == SDL_TOUCH_MOUSEID) || e->type == SDL_EVENT_FINGER_UP ||
-         e->type == SDL_EVENT_FINGER_MOTION))
+         (e->type == SDL_EVENT_MOUSE_MOTION && e->motion.which == SDL_TOUCH_MOUSEID) || e->type == SDL_EVENT_FINGER_DOWN ||
+         e->type == SDL_EVENT_FINGER_UP || e->type == SDL_EVENT_FINGER_MOTION || e->type == SDL_EVENT_FINGER_CANCELED))
         return true;
     // a binding capture (Controls tab, or the game's Options screen) takes the press
     if (bind_capture_event(e)) return true;

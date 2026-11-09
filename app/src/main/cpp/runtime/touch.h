@@ -16,10 +16,10 @@ bool touch_event(const SDL_Event *e);
 void touch_reset(void);              // let go of everything (focus lost, setting turned off)
 void touch_other_input(void);        // a controller or key was used: the overlay hides until the next touch
 
-// main thread, before the menu routes the event (runtime/ui/menu.mm): true when this finger lift ends a double tap -
-// two quick taps close together on free screen (not on a button or the stick's part while the touch controls are on;
-// anywhere while they're off), which opens the settings menu
-bool touch_double_tap(const SDL_Event *e);
+// main thread, before the menu routes the event (runtime/ui/menu.mm): true when this finger landing makes six fingers
+// on the screen at once, which opens the settings menu
+bool touch_settings_gesture(const SDL_Event *e);
+bool touch_gesture_held(void);       // the gesture's fingers are not all lifted yet
 
 bool touch_active(void);             // the setting is on and the overlay is shown
 uint64_t touch_buttons(void);        // Switch button bits held (runtime/hle/input.c BTN_*)
