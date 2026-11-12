@@ -16,6 +16,7 @@ of tools/test_layout.py).
 --simd: FP/SIMD/CRC32 as AArch64 inline asm (default on arm64 hosts) or portable C (default elsewhere).
 """
 import argparse
+import array
 import bisect
 import faulthandler
 import os
@@ -90,6 +91,12 @@ def sanitize(sym):
     return 'hle_' + re.sub(r'[^A-Za-z0-9_]', '_', sym)
 
 
+# (Module.peek: a plain op, as the analysis sees it)
+_FLAGS_RE = re.compile(r'\b(adds|subs|adcs|sbcs|logic)\d+\(|nzcv')
+_OP = Insn('op')
+_OP_FLAGS = Insn('op')
+
+
 class Module:
     def __init__(self, name, path, base, simd='asm'):
         self.name = name
@@ -98,8 +105,16 @@ class Module:
         n = self.nso
         self.lo = base + n.text[0]
         self.hi = base + n.text[0] + n.text[1]
-        self.words = struct.unpack(f'<{n.text[1] // 4}I', bytes(n.image[n.text[0]:n.text[0] + n.text[1]]))
+        # (an array, not a tuple of ints: main has 21 million instructions)
+        self.words = array.array('I', bytes(n.image[n.text[0]:n.text[0] + n.text[1]]))
+        if sys.byteorder != 'little':
+            self.words.byteswap()
         self.lifter = Lifter(base, simd)
+        # Lifted instructions, for the analysis: a plain op is one byte in kind_state (its C is lifted again when the
+        # function is written); the others, which carry branch targets and SIMD details, are kept whole in cache.
+        # Keeping every one whole took ~7 GB for main (a lifted op and its C string ~300 bytes each) and got the
+        # setup killed on 8 GB phones.
+        self.kind_state = bytearray(len(self.words))  # 0 not lifted, 1 op, 2 op that sets the flags, 3 in cache
         self.cache = {}
         self.stats = Counter()
         self.mu = None
@@ -138,7 +153,7 @@ class Module:
         f = self.fde(entry)
         if f is None or f[0] not in self.lpads:
             return None
-        if not any(self.lift(a).kind in ('bl', 'blr') for a in range(entry, end, 4)):
+        if not any(self.peek(a).kind in ('bl', 'blr') for a in range(entry, end, 4)):
             return None
         return f
 
@@ -173,15 +188,33 @@ class Module:
         return out
 
     def lift(self, a):
-        ins = self.cache.get(a)
-        if ins is None:
-            try:
-                ins = self.lifter.lift(self.word(a), a)
-            except Unsupported as e:
-                self.stats['unsupported'] += 1
-                ins = Insn('trap', f'rt_udf(c, {hx(a)}); /* {e} */')
+        """The instruction at a, lifted, with its C."""
+        i = (a - self.lo) // 4
+        if self.kind_state[i] == 3:
+            return self.cache[a]
+        try:
+            ins = self.lifter.lift(self.words[i], a)
+        except Unsupported as e:
+            self.stats['unsupported'] += 1
+            ins = Insn('trap', f'rt_udf(c, {hx(a)}); /* {e} */')
+        if ins.kind == 'op':
+            self.kind_state[i] = 2 if _FLAGS_RE.search(ins.code) else 1
+        else:
+            self.kind_state[i] = 3
             self.cache[a] = ins
         return ins
+
+    def peek(self, a):
+        """The instruction at a for the analysis: as lift, but a plain op without its C (_OP / _OP_FLAGS)."""
+        s = self.kind_state[(a - self.lo) // 4]
+        if s == 1:
+            return _OP
+        if s == 2:
+            return _OP_FLAGS
+        if s == 3:
+            return self.cache[a]
+        ins = self.lift(a)
+        return ins if ins.kind != 'op' else _OP_FLAGS if self.kind_state[(a - self.lo) // 4] == 2 else _OP
 
     def boundaries(self):
         n, b = self.nso, self.base
@@ -267,10 +300,10 @@ class Module:
             mu.reg_write(A.UC_ARM64_REG_X0 + r if r < 29 else A.UC_ARM64_REG_X29, i)
 
     def _sets_flags(self, a):
-        ins = self.lift(a)
+        ins = self.peek(a)
         if ins.kind == 'asm':
             return ins.asm.flags
-        return ins.kind == 'op' and re.search(r'\b(adds|subs|adcs|sbcs|logic)\d+\(|nzcv', ins.code) is not None
+        return ins is _OP_FLAGS
 
     def _guard_cmp(self, guard, lo):
         """The `cmp idx, #imm` that sets the flags a bounds check at guard tests, or None. Only straight-line
@@ -282,7 +315,7 @@ class Module:
             w = self.word(a)
             if (w & 0x7F80001F) == 0x7100001F:  # SUBS (imm) with Rd = zr, i.e. CMP #imm
                 return None if bits(w, 22, 1) else a
-            if self.lift(a).kind not in ('op', 'asm', 'bcond') or self._sets_flags(a):
+            if self.peek(a).kind not in ('op', 'asm', 'bcond') or self._sets_flags(a):
                 return None
             a -= 4
         return None
@@ -309,7 +342,7 @@ class Module:
                 for a in range(start, br_pc, 4):
                     if a == set_at:
                         self._set_index(mu, idx_regs, i)
-                    k = self.lift(a).kind
+                    k = self.peek(a).kind
                     if k == 'bcond':
                         continue
                     if k not in ('op', 'asm'):
@@ -330,7 +363,7 @@ class Module:
         """Form: cmp idx, #N ; b.ls/b.lo table ... table: <address math> ; br"""
         # start of the block holding the br
         s = br_pc
-        while s - 4 >= lo and br_pc - (s - 4) <= 4 * 12 and self.lift(s - 4).kind in ('op', 'asm'):
+        while s - 4 >= lo and br_pc - (s - 4) <= 4 * 12 and self.peek(s - 4).kind in ('op', 'asm'):
             s -= 4
         for g in range(lo, hi, 4):
             w = self.word(g)
@@ -359,7 +392,7 @@ class Module:
             if (w & 0xFF000010) == 0x54000000 and bits(w, 0, 4) in (8, 2):
                 guard = a
                 break
-            if self.lift(a).kind not in ('op', 'asm', 'bcond'):
+            if self.peek(a).kind not in ('op', 'asm', 'bcond'):
                 return None
             a -= 4
         if guard is None:
@@ -374,7 +407,7 @@ class Module:
             return None
         # window start: back from cmp to the first control-flow instruction
         start = cmp
-        while start - 4 >= lo and cmp - (start - 4) <= 4 * 12 and self.lift(start - 4).kind in ('op', 'asm'):
+        while start - 4 >= lo and cmp - (start - 4) <= 4 * 12 and self.peek(start - 4).kind in ('op', 'asm'):
             start -= 4
         return self._emulate_table(br_pc, lo, hi, start, cmp, self._index_regs(start, cmp, bits(w, 5, 5)), count)
 
@@ -397,7 +430,7 @@ class Module:
         a = br_pc - 4
         while a >= entry and br_pc - a <= 4 * 16:
             w = self.word(a)
-            if self.lift(a).kind not in ('op', 'asm'):
+            if self.peek(a).kind not in ('op', 'asm'):
                 return False
             if self.writes_gpr(a, rn):
                 if (w & 0x1F000000) == 0x0B000000:  # ADD/SUB (shifted or extended register)
@@ -413,7 +446,7 @@ class Module:
         labels, ext, tables = {entry}, set(), {}
         terminated = False
         for a in range(entry, end, 4):
-            ins = self.lift(a)
+            ins = self.peek(a)
             if ins.kind in ('b', 'bcond'):
                 t = ins.target
                 if entry <= t < end:
@@ -695,7 +728,7 @@ def discover(m, starts):
         # indirect branches of the final functions: jump tables resolved, all-labels fallback, plain dispatch
         for t in tables.values():
             m.stats['br_all_labels' if t == 'all' else 'jumptables'] += 1
-        m.stats['br_dispatch'] += sum(m.lift(x).kind == 'br' for x in range(a, end, 4)) - len(tables)
+        m.stats['br_dispatch'] += sum(m.peek(x).kind == 'br' for x in range(a, end, 4)) - len(tables)
     return entries, rounds
 
 
