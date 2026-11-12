@@ -66,6 +66,8 @@ typedef struct {
     uint8_t pred_used[8];
     uint32_t in_attr_mask, out_attr_mask;
     uint32_t vs_in_comp[32];
+    bool lmem_dynamic;   // a LDL / STL at an address known only when it runs (else: lmem_words of them, constant)
+    int lmem_words;
     bool uses_branches, uses_cc, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane;
     bool uses_rscale;  // resolution-scale table (MSL: fragment / compute only)
     uint32_t flat_mask;           // fragment inputs using constant (flat) interpolation
@@ -1880,7 +1882,17 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (a == RZ) sprintf(addr, "%du", off);
         else sprintf(addr, "(%s + %du)", R(a), (uint32_t)off);
         int nw = size == 5 ? 2 : size >= 6 ? 4 : 1;
-        sp(&c->body, "    { uint la = %s;\n", addr);
+        // Local memory at constant addresses only (spilled registers: the usual case) is an array of the words used,
+        // indexed by constants, which the compiler keeps in registers. The whole 1 KB, zeroed at every invocation
+        // when its accesses are dynamic, is scratch memory: a full-screen effect in Nine Sols' Limitless Realm wrote
+        // and read one word of it and took ~70 ms a frame on an Adreno 830 (14 fps) for that.
+        if (a != RZ) c->lmem_dynamic = true;
+        else {
+            int top = (int)((((uint32_t)off >> 2) & (LMEM_WORDS - 1)) + (uint32_t)nw);
+            if (top > LMEM_WORDS) c->lmem_dynamic = true;  // (wraps past the end: as the dynamic form)
+            else if (top > c->lmem_words) c->lmem_words = top;
+        }
+        sp(&c->body, a == RZ ? "    { const uint la = %s;\n" : "    { uint la = %s;\n", addr);  // (const: literal indices)
         if (!store) {
             if (size < 4) {
                 static const char *const ext[] = {"(v >> sh) & 0xFFu", "uint(int(char((v >> sh) & 0xFFu)))", "(v >> sh) & 0xFFFFu",
@@ -2278,7 +2290,15 @@ static void glsl_body(Ctx *c, Str *s, const char *body, bool any_branch, bool db
     for (int i = 0; i < 7; i++)
         if (c->pred_used[i]) sp(s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(s, "  uint cc = 0u; bool ccz = false, ccs = false;\n");
-    if (c->uses_local) sp(s, "  uint lmem[%d]; for (int li_ = 0; li_ < %d; li_++) lmem[li_] = 0u;\n", LMEM_WORDS, LMEM_WORDS);
+    if (c->uses_local) {
+        int n = c->lmem_dynamic ? LMEM_WORDS : c->lmem_words;
+        if (c->lmem_dynamic) sp(s, "  uint lmem[%d]; for (int li_ = 0; li_ < %d; li_++) lmem[li_] = 0u;\n", n, n);
+        else {  // (each word zeroed by name: no loop for the compiler to unroll first)
+            sp(s, "  uint lmem[%d];", n);
+            for (int i = 0; i < n; i++) sp(s, " lmem[%d] = 0u;", i);
+            sp(s, "\n");
+        }
+    }
     if (dbg) sp(s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (c->structured) {
         sp(s, "  bool exited = false; uint loops = 0u;\n");
@@ -3323,7 +3343,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     for (int i = 0; i < 7; i++)
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(&s, "  uint cc = 0; bool ccz = false, ccs = false;\n");
-    if (c->uses_local) sp(&s, "  uint lmem[%d] = {};\n", LMEM_WORDS);
+    if (c->uses_local) sp(&s, "  uint lmem[%d] = {};\n", c->lmem_dynamic ? LMEM_WORDS : c->lmem_words);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch) {
         sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0; uint pbk[16]; uint pbk_n = 0; uint pcnt[16]; uint pcnt_n = 0;\n");

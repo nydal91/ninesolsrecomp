@@ -59,6 +59,9 @@ file(SHA256 "${TRANSLATOR_ID_INPUT}" TRANSLATOR_ID_HASH)
 string(SUBSTRING "${TRANSLATOR_ID_HASH}" 0 16 TRANSLATOR_ID)
 file(SHA256 "${RUNTIME}/nvn/vulkan/spirv.c" SPIRV_ID_HASH)
 string(SUBSTRING "${SPIRV_ID_HASH}" 0 16 SPIRV_ID)
+# (configure again when they change: otherwise an incremental build kept the old ids and the phone its stale translations)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${RUNTIME}/nvn/maxwell/translate.c" "${RUNTIME}/nvn/maxwell/shader.h" "${RUNTIME}/nvn/vulkan/spirv.c")
 message(STATUS "TRANSLATOR_ID: ${TRANSLATOR_ID}, SPIRV_ID: ${SPIRV_ID}")
 # (an edit to these files runs this again, so the ids follow)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
