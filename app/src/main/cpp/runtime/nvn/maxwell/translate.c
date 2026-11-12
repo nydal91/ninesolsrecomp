@@ -503,12 +503,19 @@ static bool emit_half(Ctx *c, uint64_t w) {
         hstore(c, d, t, merge, sat);
         return true;
     }
-    // ---- HSETP2 / HSET2 (reg forms)
-    if ((op & 0xfff8) == 0x5d20 || (op & 0xfff8) == 0x5d18) {
-        bool setp = (op & 0xfff8) == 0x5d20;
+    // ---- HSETP2 / HSET2 (reg 5d20/5d18, cbuf 7e0x/7c0x, imm 7e8x/7c8x; field layout per Ryujinx's InstHsetp2* /
+    // InstHset2*: the cbuf and imm forms have the compare at 49 and HAnd / BVal at 53, the reg form at 35 and 49)
+    int hform = (op & 0xfff8) == 0x5d20 || (op & 0xfff8) == 0x5d18 ? 0
+              : (op & 0xfc00) == 0x7c00 ? ((op & 0x0080) ? 2 : 1) : -1;  // (bit 56, op 0x100: NegB / the imm's sign)
+    if (hform >= 0) {
+        bool setp = hform == 0 ? (op & 0xfff8) == 0x5d20 : (op & 0x0200) != 0;
         const char *x = HS(R(a), (int)bits(w, 47, 2), bits(w, 43, 1), bits(w, 44, 1));
-        const char *y = HS(R((int)bits(w, 20, 8)), (int)bits(w, 28, 2), bits(w, 31, 1), bits(w, 30, 1));
-        int cop = (int)bits(w, 35, 4), bop = (int)bits(w, 45, 2);
+        const char *y;
+        if (hform == 0) y = HS(R((int)bits(w, 20, 8)), (int)bits(w, 28, 2), bits(w, 31, 1), bits(w, 30, 1));
+        else if (hform == 1) y = HS(cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb), 1, bits(w, 56, 1), bits(w, 54, 1));
+        else { sprintf(ib, "0x%08xu", himm(w)); y = HS(ib, 0, false, false); }
+        int cop = (int)bits(w, hform ? 49 : 35, 4), bop = (int)bits(w, 45, 2);
+        int flag_bit = hform ? 53 : 49;  // (HAnd for HSETP2, BVal for HSET2)
         const char *pp = P((int)bits(w, 39, 3), bits(w, 42, 1));
         char lx[512], ly[512];
         sp(&c->body, "    { float2 hx_ = %s, hy_ = %s; bool pp = %s;\n", x, y, pp);
@@ -517,12 +524,12 @@ static bool emit_half(Ctx *c, uint64_t w) {
         sp(&c->body, "      bool l = %s, h = %s;\n", lx, ly);
         if (setp) {
             int pa = (int)bits(w, 3, 3), pb = (int)bits(w, 0, 3);
-            bool hand = bits(w, 49, 1);
+            bool hand = bits(w, flag_bit, 1);
             if (hand) sp(&c->body, "      l = l && h; h = !l;\n");
             if (pa != PT) { c->pred_used[pa] = 1; sp(&c->body, "      p%d = l %s pp;\n", pa, bool_op(bop)); }
             if (pb != PT) { c->pred_used[pb] = 1; sp(&c->body, "      p%d = h %s pp;\n", pb, bool_op(bop)); }
         } else {
-            bool bf = bits(w, 49, 1);
+            bool bf = bits(w, flag_bit, 1);
             if (d != RZ) {
                 c->reg_used[d] = 1;
                 sp(&c->body, "      l = l %s pp; h = h %s pp;\n", bool_op(bop), bool_op(bop));
@@ -857,7 +864,7 @@ static bool writes_gpr(uint64_t w) {
     static const uint16_t none[][2] = {  // top 16 bits: value, mask
         {0x5bb0, 0xfff0}, {0x4bb0, 0xfff0}, {0x36b0, 0xfef0},  // FSETP
         {0x5b60, 0xfff0}, {0x4b60, 0xfff0}, {0x3660, 0xfef0},  // ISETP
-        {0x5d20, 0xfff8}, {0x5090, 0xfff8}, {0x50a0, 0xfff8},  // HSETP2, PSETP, CSETP
+        {0x5d20, 0xfff8}, {0x7e00, 0xfe00}, {0x5090, 0xfff8}, {0x50a0, 0xfff8},  // HSETP2 (reg; cbuf / imm), PSETP, CSETP
         {0x38f0, 0xfef8}, {0x5cf0, 0xfff8}, {0x4cf0, 0xfff8},  // R2P
         {0xeff0, 0xfff8}, {0xeed8, 0xfff8}, {0xef50, 0xfff8}, {0xef58, 0xfff8},  // ST attribute, STG, STL, STS
         {0xe300, 0xfff0}, {0xe330, 0xfff0}, {0xe240, 0xfff0}, {0xe250, 0xfff0},  // EXIT, KIL, BRA, BRX
@@ -883,7 +890,8 @@ static int bindless_index(Ctx *c, uint32_t pc, int r) {
         if (i % 4 == 0) continue;  // scheduling words
         uint64_t w = code[i];
         if ((int)bits(w, 0, 8) != r || !writes_gpr(w)) continue;
-        bool always = bits(w, 16, 3) == PT && !bits(w, 19, 1);
+        // (or under the reader's own predicate: @!P0 MOV R6, c[2][..]; @!P0 TEX.B .. R6 - Unity's sprite shaders)
+        bool always = (bits(w, 16, 3) == PT && !bits(w, 19, 1)) || bits(w, 16, 4) == bits(code[pc / 8], 16, 4);
         if (always && (w & 0xfff8000000000000ull) == 0x4c98000000000000ull && bits(w, 34, 5) == 2)  // MOV c[2][]
             return (int)bits(w, 20, 14);
         if (always && (w & 0xfff8000000000000ull) == 0xef90000000000000ull && bits(w, 8, 8) == RZ &&  // LDC c[2][]
@@ -1252,11 +1260,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         uint32_t addr = (uint32_t)bits(w, 20, 10);
         int ia = (int)bits(w, 8, 8);
         if (ia != RZ) { fail(c, "indexed ld a[]"); }
-        for (int i = 0; i < n; i++) attr_load(c, d + i, addr + 4 * i, NULL);
+        for (int i = 0; i < n; i++) attr_load(c, d == RZ ? RZ : d + i, addr + 4 * i, NULL);
     } else if (OPM(0xeff0000000000000ull, 0xfff8000000000000ull)) {  // ST attribute
         int n = 1 + (int)bits(w, 47, 2);
         uint32_t addr = (uint32_t)bits(w, 20, 10);
-        for (int i = 0; i < n; i++) attr_store(c, d + i, addr + 4 * i);
+        for (int i = 0; i < n; i++) attr_store(c, d == RZ ? RZ : d + i, addr + 4 * i);  // (RZ: every word is zero)
     } else if (OPM(0xef90000000000000ull, 0xfff8000000000000ull)) {  // LD c[idx][reg + imm]
         int idx = (int)bits(w, 36, 5);
         int64_t off = (int64_t)bits(w, 20, 16);  // unsigned (Ryujinx InstLdc.CbufOffset)
