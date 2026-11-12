@@ -369,7 +369,7 @@ static bool region_remove(uint64_t addr) {  // (false: no region starts there)
 // the console, mapping a range maps only its pages that aren't mapped yet - the ones that are keep what they hold.
 // The SDK's heap writes its own header into the first page of a region and then maps the whole region over it
 // (nn::nlibsdk::heap::TlsHeapCentral::Init): zeroing everything again wiped that header. One bit per alias page.
-static uint8_t g_phys_bits[ALIAS_SIZE / 0x1000 / 8];
+static uint8_t g_phys_bits[ALIAS_SIZE_MAX / 0x1000 / 8];
 static pthread_mutex_t g_phys_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool phys_bit(uint64_t pg) { return g_phys_bits[pg >> 3] >> (pg & 7) & 1; }
 

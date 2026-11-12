@@ -31,7 +31,15 @@ static inline void rt_log(const char *fmt, ...) {
 // region (below). Not up to the 39-bit limit: Android maps the app's own libraries from about 0x7a_8000_0000 up
 // (an Android 15 phone; it moves a little from boot to boot), and a window over them can't be reserved.
 #define GUEST_LO     0x7000000000ull
-#define GUEST_HI     0x7800000000ull
+#define GUEST_HI_MAX 0x7800000000ull
+// The window's end: GUEST_HI_MAX, or lower on Android when the system already has something mapped below it (see
+// reserve_guest_space in main.c). The alias region ends there too.
+#ifdef __cplusplus
+extern "C" uint64_t g_guest_hi;
+#else
+extern uint64_t g_guest_hi;
+#endif
+#define GUEST_HI     g_guest_hi
 // The exefs modules (main, subsdk0..9, sdk) sit back to back from MAIN_BASE, main first, as tools/layout.py
 // places them; the game code library says where each one is (runtime/gamelib.h). Both bounds: tools/layout.py too.
 #define MAIN_BASE    0x7000000000ull
@@ -46,7 +54,8 @@ static inline void rt_log(const char *fmt, ...) {
 // MapPhysicalMemory). Nine Sols: Unity's startup reserves all the free memory (~3.2 GB) as one region, which the SDK
 // aligns to 1 GB: 4 GB, the old size, can't hold it next to the SDK's own page. 16 GB, to the window's end.
 #define ALIAS_BASE   0x7400000000ull
-#define ALIAS_SIZE   0x0400000000ull
+#define ALIAS_SIZE   (GUEST_HI - ALIAS_BASE)
+#define ALIAS_SIZE_MAX (GUEST_HI_MAX - ALIAS_BASE)
 #define HEAP_BASE    0x7240000000ull
 #define HEAP_MAX     0x00D0000000ull   // 3.25 GB
 

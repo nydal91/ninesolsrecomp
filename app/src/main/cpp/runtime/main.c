@@ -2,6 +2,7 @@
 #include <SDL3/SDL.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <sys/mman.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,12 +80,55 @@ static void rtld_fini_main(Cpu *c) {
 // for the whole boot: only a reboot gives a new layout. The constructor can't show anything, and
 // exit() here runs atexit handlers of modules already unloaded (Magisk Zygisk's -> SIGSEGV and a
 // relaunch loop), so it only records the failure; sw_main shows it and leaves with _exit.)
+uint64_t g_guest_hi = GUEST_HI_MAX;
 #ifdef __ANDROID__
 static bool g_guest_space_busy;
+static uint64_t g_guest_block_lo;   // (the lowest system mapping in the window, for the log / the message)
+static char g_guest_block_name[160];
+// The lowest window end the game runs with: the alias region has to hold Unity's reservation, which starts at
+// 0x74_4000_0000 and reached 0x75_83.. in play (a 3.2 GB application; the SDK aligns its regions to 1 GB).
+#define GUEST_HI_MIN 0x7600000000ull
+
+// The lowest mapping of this process that overlaps [lo, hi), from /proc/self/maps (0: none)
+static uint64_t lowest_mapping(uint64_t lo, uint64_t hi, char *name, size_t n) {
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return 0;
+    char line[512];
+    uint64_t best = 0;
+    while (fgets(line, sizeof line, f)) {
+        unsigned long long a, e;
+        int off = 0;
+        if (sscanf(line, "%llx-%llx %*s %*s %*s %*s %n", &a, &e, &off) < 2 || e <= lo || a >= hi) continue;
+        if (!best || a < best) {
+            best = a < lo ? lo : a;
+            snprintf(name, n, "%s", off ? line + off : "");
+            name[strcspn(name, "\n")] = 0;
+        }
+    }
+    fclose(f);
+    return best;
+}
 #endif
 __attribute__((constructor(101))) static void reserve_guest_space(void) {
+#ifdef __ANDROID__
+    // (SAVAGEWIND_GUEST_HI=<hex>: a lower end to test with)
+    const char *test_hi = getenv("SAVAGEWIND_GUEST_HI");
+    if (test_hi && *test_hi) g_guest_hi = strtoull(test_hi, NULL, 16) & ~0x3FFFFFFFull;
+    if (g_guest_hi < GUEST_HI_MIN || g_guest_hi > GUEST_HI_MAX) g_guest_hi = GUEST_HI_MAX;
+    // (SAVAGEWIND_GUEST_BLOCK=<hex>: a page mapped there first, as a system mapping in the window, to test with)
+    const char *test_block = getenv("SAVAGEWIND_GUEST_BLOCK");
+    if (test_block && *test_block)
+        mmap((void *)(uintptr_t)(strtoull(test_block, NULL, 16) & ~0xFFFull), 0x1000, PROT_READ,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+#endif
     if (plat_reserve_guest(GUEST_LO, GUEST_HI)) return;
 #ifdef __ANDROID__
+    // Something of the system's sits in the window (zygote's mappings grow down from the top of the 39-bit space,
+    // below 0x78_0000_0000 on some phones): end the window below it if the game still fits, 1 GB aligned.
+    uint64_t block = lowest_mapping(GUEST_LO, GUEST_HI, g_guest_block_name, sizeof g_guest_block_name);
+    g_guest_block_lo = block;
+    uint64_t hi = block & ~0x3FFFFFFFull;
+    if (block && hi >= GUEST_HI_MIN && plat_reserve_guest(GUEST_LO, hi)) { g_guest_hi = hi; return; }
     g_guest_space_busy = true;
 #else
     const char *tries = getenv("SAVAGEWIND_REEXEC");
@@ -359,9 +403,11 @@ int main(int argc, char **argv) {
                  "The memory range the game needs (%llx-%llx) is already in use by Android on this boot.\n\n"
                  "Restart the phone and open Nine Sols Recomp again. If it keeps happening after several restarts, "
                  "this device doesn't have the address space layout the game needs.",
-                 (unsigned long long)GUEST_LO, (unsigned long long)GUEST_HI);
-        fprintf(stderr, "FATAL: guest address range %llx-%llx is not free\n", (unsigned long long)GUEST_LO,
-                (unsigned long long)GUEST_HI);
+                 (unsigned long long)GUEST_LO, (unsigned long long)GUEST_HI_MIN);
+        fprintf(stderr, "FATAL: guest address range %llx-%llx is not free (needs %llx-%llx at least; lowest mapping "
+                "at %llx: %s)\n", (unsigned long long)GUEST_LO, (unsigned long long)GUEST_HI_MAX,
+                (unsigned long long)GUEST_LO, (unsigned long long)GUEST_HI_MIN, (unsigned long long)g_guest_block_lo,
+                g_guest_block_name);
         fflush(stderr);
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Nine Sols Recomp", text, NULL);
         _exit(1);  // (not exit: see reserve_guest_space)
@@ -376,6 +422,12 @@ int main(int argc, char **argv) {
     // every log starts with which Savage Wind made it: the version and the source it was built from (Makefile SW_SOURCE)
     extern const char *rt_version(void);  // (runtime/ui/launcher.mm)
     fprintf(stderr, "[savagewind] Savage Wind %s (%s)\n", rt_version(), SW_SOURCE);
+#ifdef __ANDROID__
+    if (GUEST_HI != GUEST_HI_MAX)
+        fprintf(stderr, "[savagewind] guest window %llx-%llx (the system has %s at %llx)\n", (unsigned long long)GUEST_LO,
+                (unsigned long long)GUEST_HI, g_guest_block_name[0] ? g_guest_block_name : "a mapping",
+                (unsigned long long)g_guest_block_lo);
+#endif
     control_init();
     const char *root = "extracted";  // (in the data root)
     bool skip_launcher = getenv("SAVAGEWIND_NO_LAUNCHER") || getenv("SAVAGEWIND_INPUT");  // tests boot straight in
