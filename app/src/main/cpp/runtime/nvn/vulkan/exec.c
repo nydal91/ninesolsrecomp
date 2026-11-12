@@ -306,10 +306,12 @@ static void ring_retire(void);
 // ---- SAVAGEWIND_GPUPROF_AT=<frame>: GPU time per pass / dispatch / copy of that frame, logged as "[gpuprof]".
 // A timestamp (ALL_COMMANDS: after everything before it) at each mark; a row = the work since the previous mark.
 bool g_gpuprof_frame;
+volatile int g_gpuprof_auto_request;  // (device.c) a slow, GPU-bound stretch: profile the next frame
+bool g_gpuprof_draws;  // (device.c: the automatic capture, or SAVAGEWIND_GPUPROF_DRAWS=1) a mark at every draw, not just per pass
 static VkQueryPool gp_qp;
 static int gp_n;
 #define GP_MAX 4096  // (an open-world frame has ~1500 marks)
-static char gp_label[GP_MAX][112];
+static char gp_label[GP_MAX][224];
 static uint32_t gp_draws[GP_MAX];
 // SAVAGEWIND_VK_DEVLOST_TRACE=1: the last 64 GPU operations, dumped on device loss (with SAVAGEWIND_SYNC_SUBMIT=1 the
 // dump ends with the command list that faulted).
@@ -408,6 +410,21 @@ void vk_gpuprof_report(void) {
             LOG("[gpuprof] %6.3f ms %5.1f%%  %s%s", ms, 100 * ms / (total > 0 ? total : 1), gp_label[i], gp_draws[i] ? "" : "\n");
             if (gp_draws[i]) LOG(", %u draws\n", gp_draws[i]);
         }
+        // the slowest rows again, first (a frame of a few hundred rows otherwise needs sorting by hand)
+        static int top[8];
+        int ntop = 0;
+        for (int i = 0; i + 1 < gp_n; i++) {
+            uint64_t d = t[i + 1] - t[i];
+            if (gp_label[i + 1][0] == '(') continue;  // (up to a submission start: its time includes the GPU idle before it)
+            int k;
+            if (ntop < 8) k = ntop++;
+            else if (d > t[top[7] + 1] - t[top[7]]) k = 7;
+            else continue;
+            while (k > 0 && d > t[top[k - 1] + 1] - t[top[k - 1]]) { top[k] = top[k - 1]; k--; }
+            top[k] = i;
+        }
+        for (int k = 0; k < ntop; k++)
+            LOG("[gpuprof] slowest %d: %6.3f ms  %s\n", k + 1, (t[top[k] + 1] - t[top[k]]) * per, gp_label[top[k]]);
     }
     gp_n = 0;
 }
@@ -983,6 +1000,9 @@ void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
     last_t = now; l_exec = cum_exec; l_wait = cum_wait; l_xwait = cum_xwait; l_draws = cum_draws; l_subs = cum_submits;
 }
 
+static uint64_t last_window_wait_ns;
+double vk_window_wait_ms(void) { return (double)last_window_wait_ns / 1e6; }  // (device.c) the last stats interval's GPU waits
+
 const char *renderer_stats(void) {
     static int dumps, always = -1;
     if (always < 0) always = getenv("SAVAGEWIND_LOG_CMD_COUNTS") != NULL;  // (debugging) every interval, not just the first 3
@@ -1079,6 +1099,7 @@ const char *renderer_stats(void) {
         prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
+    last_window_wait_ns = stat_wait_ns;
     stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
     return stats_text;
 }
@@ -7695,6 +7716,17 @@ have_pipe:;
             snprintf(gp_label[gp_n - 1] + l, sizeof gp_label[0] - l, ", first fs %016llx", (unsigned long long)g_cur_fs_hash);
         }
         gp_draws[gp_n - 1]++;
+    }
+    if (g_gpuprof_frame && g_gpuprof_draws && gp_n) {
+        // Draw by draw: a tiler (Adreno) runs a pass tile by tile, so timestamps inside it don't time its draws. The
+        // pass ends after each draw instead (the next one loads the targets again) and the row up to here is this draw.
+        vk_end_pass();
+        size_t l = strlen(gp_label[gp_n - 1]);
+        snprintf(gp_label[gp_n - 1] + l, sizeof gp_label[0] - l, " | draw vs %llx fs %llx, %u %s x%u, target %ux%u",
+                 (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)st.program->stages[1].code_addr,
+                 use_index ? icount : count, use_index ? "indices" : "vertices", inst,
+                 st.rt.color[0] ? st.rt.color[0]->width : 0, st.rt.color[0] ? st.rt.color[0]->height : 0);
+        gp_mark(vk_cmd(), "after a draw");
     }
 }
 

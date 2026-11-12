@@ -2074,7 +2074,14 @@ presented:
     {   // SAVAGEWIND_GPUPROF_AT=<frame>[,<frame>...]: GPU time per pass of those frames ("[gpuprof]" in the log)
         extern bool g_gpuprof_frame;
         extern void vk_gpuprof_report(void);
-        if (g_gpuprof_frame) { g_gpuprof_frame = false; vk_gpuprof_report(); }
+        extern bool g_gpuprof_draws;
+        extern volatile int g_gpuprof_auto_request;
+        if (g_gpuprof_frame) {
+            g_gpuprof_frame = false;
+            vk_gpuprof_report();
+            g_gpuprof_draws = getenv("SAVAGEWIND_GPUPROF_DRAWS") != NULL;
+        }
+        if (g_gpuprof_auto_request) { g_gpuprof_auto_request = 0; g_gpuprof_frame = g_gpuprof_draws = true; }
         const char *e = getenv("SAVAGEWIND_GPUPROF_AT");
         for (const char *p = e; p && *p;) {
             long at = strtol(p, (char **)&p, 10);
@@ -2202,9 +2209,29 @@ presented:
     if (prev_present > 0 && now - prev_present > max_gap) max_gap = now - prev_present;
     prev_present = now;
     if (now - last_fps_time >= fps_iv) {
-        if (last_fps_time > 0)
+        if (last_fps_time > 0) {
             LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms (%s)\n", now, (unsigned long long)total_frames,
                 frames / (now - last_fps_time), max_gap * 1000.0, renderer_stats());
+            // A slow stretch where the CPU mostly waited for the GPU: one frame of it timed draw by draw ("[gpuprof]"
+            // in the log), at most 3 times a run, 20 s apart - what a GPU we don't have spends its time on, from a
+            // player's log. SAVAGEWIND_GPUPROF_AUTO=<fps>: below that (default 24; 0: off).
+            // SAVAGEWIND_GPUPROF_AUTO_WAIT=<fraction> of the interval spent waiting (default 0.5).
+            static double auto_fps = -1, auto_wait, auto_last;
+            static int auto_n;
+            if (auto_fps < 0) {
+                auto_fps = getenv("SAVAGEWIND_GPUPROF_AUTO") ? atof(getenv("SAVAGEWIND_GPUPROF_AUTO")) : 24;
+                auto_wait = getenv("SAVAGEWIND_GPUPROF_AUTO_WAIT") ? atof(getenv("SAVAGEWIND_GPUPROF_AUTO_WAIT")) : 0.5;
+            }
+            extern double vk_window_wait_ms(void);
+            extern volatile int g_gpuprof_auto_request;
+            double fps = frames / (now - last_fps_time), waited = vk_window_wait_ms() / 1000.0 / (now - last_fps_time);
+            if (fps < auto_fps && fps > 0.5 && waited >= auto_wait && auto_n < 3 && (!auto_n || now - auto_last > 20)) {
+                auto_n++;
+                auto_last = now;
+                g_gpuprof_auto_request = 1;
+                LOG("[gpuprof] %.1f fps, %.0f%% of it waiting for the GPU: timing the next frame draw by draw\n", fps, waited * 100);
+            }
+        }
         if (gen_frames && last_fps_time > 0)
             LOG("[fg] %.1f generated frames/s: %.1f presented\n", gen_frames / (now - last_fps_time),
                 (frames + gen_frames) / (now - last_fps_time));
