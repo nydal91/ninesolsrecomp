@@ -6251,7 +6251,24 @@ static bool cs_get(const ShaderInfo *si, const uint32_t local[3], CsBuild **out)
 static void cs_make(CsBuild *c) {
     VkResult r = VK_ERROR_UNKNOWN;
     size_t n = 0;
-    uint32_t *spv = vk_glsl_to_spirv(c->si->msl, STAGE_COMPUTE, "cs", &n);
+    // The group size written into the source rather than given as specialization constants: for Vulkan 1.3 glslang
+    // turns local_size_x_id into SPIR-V 1.6 LocalSizeId, and Mali's driver (r44, G615) crashed creating the pipeline.
+    static const char ID_FORM[] = "layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;";
+    const char *src = c->si->msl, *at = strstr(src, ID_FORM);
+    char *own = NULL;
+    if (at) {
+        char lit[96];
+        int ln = snprintf(lit, sizeof lit, "layout(local_size_x = %u, local_size_y = %u, local_size_z = %u) in;",
+                          c->local[0], c->local[1], c->local[2]);
+        size_t pre = (size_t)(at - src), post = strlen(at + sizeof ID_FORM - 1);
+        own = malloc(pre + (size_t)ln + post + 1);
+        memcpy(own, src, pre);
+        memcpy(own + pre, lit, (size_t)ln);
+        memcpy(own + pre + ln, at + sizeof ID_FORM - 1, post + 1);
+        src = own;
+    }
+    uint32_t *spv = vk_glsl_to_spirv(src, STAGE_COMPUTE, "cs", &n);
+    free(own);
     if (spv) {
         c->nbinds = vk_reflect(spv, n, c->binds, MAX_BIND);
         VkShaderModule m = vk_module(spv, n);
@@ -6267,7 +6284,7 @@ static void cs_make(CsBuild *c) {
         VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .pNext = &fci,
                                           .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                                     .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main",
-                                                    .pSpecializationInfo = &spec},
+                                                    .pSpecializationInfo = at ? NULL : &spec},
                                           .layout = c->layout};
         r = m ? vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &c->pipe) : VK_ERROR_INVALID_SHADER_NV;
         if (r == VK_SUCCESS) cache_feedback(&fb);
