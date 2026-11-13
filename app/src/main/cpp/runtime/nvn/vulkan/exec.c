@@ -6278,17 +6278,18 @@ static void cs_make(CsBuild *c) {
         c->set_layout = sl[0];
         VkSpecializationMapEntry me[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
         VkSpecializationInfo spec = {3, me, 12, c->local};
-        VkPipelineCreationFeedback fb = {0};
-        VkPipelineCreationFeedbackCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO,
-                                                    .pPipelineCreationFeedback = &fb};
-        VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .pNext = &fci,
+        // No VkPipelineCreationFeedbackCreateInfo here (graphics pipelines have one): Mali's driver (G615, r44p1)
+        // crashed at address 0 in vkCreateComputePipelines with it, as if it wrote the per-stage feedback the
+        // struct left out (a null array with count 0, which the spec allows).
+        VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
                                           .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                                     .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main",
                                                     .pSpecializationInfo = at ? NULL : &spec},
                                           .layout = c->layout};
-        r = m ? vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &c->pipe) : VK_ERROR_INVALID_SHADER_NV;
-        if (r == VK_SUCCESS) cache_feedback(&fb);
-        else LOG("[compute] pipeline failed: %d\n", r);
+        r = m && c->layout ? vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &c->pipe)
+            : VK_ERROR_INVALID_SHADER_NV;
+        if (r != VK_SUCCESS) LOG("[compute] pipeline failed: %d (module %s, layout %s)\n", r, m ? "ok" : "none",
+                                 c->layout ? "ok" : "none");
     }
     pthread_mutex_lock(&warm_lock);
     atomic_store(&c->state, r == VK_SUCCESS ? 2 : 3);
