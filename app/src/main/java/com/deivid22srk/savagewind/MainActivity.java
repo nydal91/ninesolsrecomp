@@ -249,6 +249,23 @@ public class MainActivity extends SDLActivity {
         });
     }
 
+    // No Vulkan 1.3 GPU with the driver in use (runtime/nvn/vulkan/device.c no_vulkan13, through android_bridge.c),
+    // before the start screen can be drawn: install a driver .zip (pickDriverZip: the answer reaches native code the
+    // same way) or quit.
+    public static void chooseDriver(final String message) {
+        final MainActivity a = (MainActivity) sContext;
+        a.runOnUiThread(() -> new AlertDialog.Builder(a)
+                .setTitle("A newer GPU driver is needed")
+                .setMessage(message)
+                .setCancelable(false)
+                .setPositiveButton("Install driver (.zip)...", (d, w) -> pickDriverZip())
+                .setNegativeButton("Quit", (d, w) -> {
+                    a.finishAndRemoveTask();
+                    System.exit(0);
+                })
+                .show());
+    }
+
     private void installPickedDriver(final Uri uri) {
         new Thread(() -> {
             String name = null;

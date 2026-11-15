@@ -123,6 +123,21 @@ static void fall_back(void) {  // (the custom driver didn't work out: the system
     for (int i = 0; i < VKD_COUNT; i++) vkd_fn[i] = gipa(NULL, vkd_names[i]);
 }
 
+// The GPU the driver in use shows can't run the game (no Vulkan 1.3: runtime/nvn/vulkan/device.c pick_device): another
+// installed driver instead, once the runtime has destroyed its instance. False (and the system driver) when it could
+// not be loaded.
+bool vk_driver_switch(const char *want) {
+    gipa = NULL;
+    gdpa = NULL;
+    lib = NULL;  // (left loaded: unloading a driver isn't safe)
+    bool ok = open_custom(want);
+    if (!ok && !open_system()) abort();
+    gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr");
+    for (int i = 0; i < VKD_COUNT; i++) vkd_fn[i] = gipa(NULL, vkd_names[i]);
+    VLOG("[vk] Vulkan driver: %s\n", driver_name);
+    return ok;
+}
+
 const char *vk_driver_name(void) { return driver_name; }
 bool vk_driver_custom(void) { return custom; }
 

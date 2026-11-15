@@ -19,7 +19,7 @@ static JavaVM *g_vm;
 static jobject g_activity;      // global ref (MainActivity)
 static jclass g_clsMain;        // MainActivity
 static jclass g_clsSwgen;       // Swgen
-static jmethodID g_mPickFolder, g_mPickFile, g_mPickDriver, g_mPickSave;
+static jmethodID g_mPickFolder, g_mPickFile, g_mPickDriver, g_mPickSave, g_mChooseDriver;
 static jmethodID g_mSwgenRun;
 
 // Pending dialog callbacks from runtime/ui/launcher.mm (SDL's dialog API is async).
@@ -106,6 +106,7 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     g_mPickFile = (*env)->GetStaticMethodID(env, main, "pickFile", "()V");
     g_mPickDriver = (*env)->GetStaticMethodID(env, main, "pickDriverZip", "()V");
     g_mPickSave = (*env)->GetStaticMethodID(env, main, "pickSaveFolder", "()V");
+    g_mChooseDriver = (*env)->GetStaticMethodID(env, main, "chooseDriver", "(Ljava/lang/String;)V");
 
     jclass swgen = (*env)->FindClass(env, "com/deivid22srk/savagewind/Swgen");
     if (swgen) {
@@ -147,6 +148,18 @@ bool android_pick_driver_zip(void) {
     g_drv_ready = false;
     pthread_mutex_unlock(&g_drv_mu);
     (*env)->CallStaticVoidMethod(env, g_clsMain, g_mPickDriver);
+    return true;
+}
+
+bool android_choose_driver(const char *message) {
+    JNIEnv *env = thread_env();
+    if (!env || !g_mChooseDriver) return false;
+    pthread_mutex_lock(&g_drv_mu);
+    g_drv_ready = false;
+    pthread_mutex_unlock(&g_drv_mu);
+    jstring m = (*env)->NewStringUTF(env, message);
+    (*env)->CallStaticVoidMethod(env, g_clsMain, g_mChooseDriver, m);
+    (*env)->DeleteLocalRef(env, m);
     return true;
 }
 

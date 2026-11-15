@@ -6,6 +6,9 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __ANDROID__
+#include <dirent.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -132,25 +135,126 @@ static bool has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
     return false;
 }
 
+#ifdef __ANDROID__
+// No Vulkan 1.3 GPU with the driver in use: many phones (an Adreno 710 on its own driver: Vulkan 1.1) need an installed
+// one such as Mesa Turnip, and the menu that installs drivers is drawn with Vulkan too - so it's done here, before the
+// start screen. Installed drivers not tried yet are tried first, one per call; then a dialog (MainActivity.chooseDriver)
+// asks for a driver .zip. Each time, the instance and surface are made again with the new driver, and pick_device looks
+// once more. The driver that works becomes the GPU driver setting.
+static bool create_surface(void);
+static char g_drv_switched[64];  // (the driver this chose: saved as the setting once it shows a Vulkan 1.3 GPU)
+
+static bool reopen_with_driver(const char *name) {
+    vkDestroySurfaceKHR(g_vk.inst, g_vk.surface, NULL);
+    vkDestroyInstance(g_vk.inst, NULL);
+    g_vk.surface = VK_NULL_HANDLE;
+    g_vk.inst = VK_NULL_HANDLE;
+    bool ok = vk_driver_switch(name);
+    create_instance();
+    // (the file picker sent the app to the background: the window comes back with a new ANativeWindow)
+    while (!create_surface()) {
+        SDL_PumpEvents();
+        SDL_Delay(20);
+    }
+    if (ok) snprintf(g_drv_switched, sizeof g_drv_switched, "%s", name);
+    return ok;
+}
+
+static void no_vulkan13(const char *gpu, uint32_t api) {
+    static char tried[32][64];
+    static int ntried;
+    static char note[384];
+    if (vk_driver_custom() && ntried < 32)  // (the one in use: the setting's, or one tried below)
+        snprintf(tried[ntried++], sizeof tried[0], "%s", g_drv_switched[0] ? g_drv_switched : g_settings.gpu_driver);
+    if (vk_driver_custom()) snprintf(note, sizeof note, "The driver %s shows no Vulkan 1.3 GPU either.\n\n", vk_driver_name());
+    const char *root = getenv("SAVAGEWIND_DRIVERS_DIR");
+    DIR *d = root ? opendir(root) : NULL;
+    while (d) {
+        struct dirent *e = readdir(d);
+        if (!e) break;
+        if (e->d_name[0] == '.' || e->d_type != DT_DIR) continue;
+        bool seen = false;
+        for (int i = 0; i < ntried && !seen; i++) seen = !strcmp(tried[i], e->d_name);
+        if (seen || ntried >= 32) continue;
+        snprintf(tried[ntried++], sizeof tried[0], "%s", e->d_name);
+        LOG("[vk] no Vulkan 1.3 GPU: trying the installed driver %s\n", e->d_name);
+        if (reopen_with_driver(e->d_name)) {
+            closedir(d);
+            return;
+        }
+    }
+    if (d) closedir(d);
+    for (;;) {
+        char msg[1024];
+        snprintf(msg, sizeof msg,
+                 "%sThis phone's GPU driver (%s) supports Vulkan %u.%u, and the game needs Vulkan 1.3.\n\n"
+                 "A newer driver fixes that: Mesa Turnip for Adreno GPUs, as a .zip in the AdrenoTools format (with a "
+                 "meta.json inside). Pick one to install it; it is used from then on (Settings > Video > GPU driver).",
+                 note, gpu, VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api));
+        if (!android_choose_driver(msg)) FATAL("no Vulkan 1.3 device\n");
+        char name[64], err[256];
+        while (!android_driver_install_poll(name, sizeof name, err, sizeof err)) {
+            SDL_PumpEvents();
+            SDL_Delay(20);
+        }
+        if (!name[0]) {  // (cancelled, or not a driver zip)
+            snprintf(note, sizeof note, "%s%s", err, err[0] ? "\n\n" : "");
+            continue;
+        }
+        for (int i = 0; i < ntried; i++)
+            if (!strcmp(tried[i], name)) tried[i][0] = 0;  // (installed again: a new copy, tried again)
+        if (ntried < 32) snprintf(tried[ntried++], sizeof tried[0], "%s", name);
+        LOG("[vk] no Vulkan 1.3 GPU: trying the driver just installed, %s\n", name);
+        if (reopen_with_driver(name)) return;
+        snprintf(note, sizeof note, "%s could not be loaded.\n\n", name);
+    }
+}
+#endif
+
 // Discrete GPU first (SAVAGEWIND_GPU=<index> picks one), needs Vulkan 1.3 and a queue that can present.
 static void pick_device(void) {
-    uint32_t n = 0;
-    vkEnumeratePhysicalDevices(g_vk.inst, &n, NULL);
-    if (!n) FATAL("no Vulkan device\n");
-    VkPhysicalDevice *pd = calloc(n, sizeof *pd);
-    vkEnumeratePhysicalDevices(g_vk.inst, &n, pd);
-    int want = getenv("SAVAGEWIND_GPU") ? atoi(getenv("SAVAGEWIND_GPU")) : -1, best = -1, best_score = -1;
-    for (uint32_t i = 0; i < n; i++) {
-        VkPhysicalDeviceProperties p;
-        vkGetPhysicalDeviceProperties(pd[i], &p);
-        LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
-            VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
-        if (p.apiVersion < VK_API_VERSION_1_3) continue;
-        int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
-        if ((int)i == want) score = 100;
-        if (score > best_score) { best_score = score; best = (int)i; }
+    VkPhysicalDevice *pd;
+    int best;
+    for (;;) {
+        uint32_t n = 0;
+        vkEnumeratePhysicalDevices(g_vk.inst, &n, NULL);
+        if (!n) FATAL("no Vulkan device\n");
+        pd = calloc(n, sizeof *pd);
+        vkEnumeratePhysicalDevices(g_vk.inst, &n, pd);
+        int want = getenv("SAVAGEWIND_GPU") ? atoi(getenv("SAVAGEWIND_GPU")) : -1, best_score = -1;
+        best = -1;
+        VkPhysicalDeviceProperties first = {0};
+        for (uint32_t i = 0; i < n; i++) {
+            VkPhysicalDeviceProperties p;
+            vkGetPhysicalDeviceProperties(pd[i], &p);
+            if (!i) first = p;
+            LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
+                VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
+            if (p.apiVersion < VK_API_VERSION_1_3) continue;
+#ifdef __ANDROID__
+            // (tests) SAVAGEWIND_TEST_NO_VK13=1: the system driver counts as too old (no_vulkan13 on any phone)
+            if (getenv("SAVAGEWIND_TEST_NO_VK13") && !vk_driver_custom()) { first.apiVersion = VK_API_VERSION_1_1; continue; }
+#endif
+            int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
+            if ((int)i == want) score = 100;
+            if (score > best_score) { best_score = score; best = (int)i; }
+        }
+        if (best >= 0) break;
+        free(pd);
+#ifdef __ANDROID__
+        no_vulkan13(first.deviceName, first.apiVersion);
+#else
+        (void)first;
+        FATAL("no Vulkan 1.3 device\n");
+#endif
     }
-    if (best < 0) FATAL("no Vulkan 1.3 device\n");
+#ifdef __ANDROID__
+    if (g_drv_switched[0] && vk_driver_custom()) {
+        LOG("[vk] GPU driver setting: %s\n", g_drv_switched);
+        snprintf(g_settings.gpu_driver, sizeof g_settings.gpu_driver, "%s", g_drv_switched);
+        settings_save();
+    }
+#endif
     g_vk.phys = pd[best];
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
